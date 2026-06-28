@@ -335,7 +335,7 @@ class data(object):
             if field in ('t', 'time'):
                 self._time=newdata[field]
             else:
-                setattr(self, field, newdata[field])
+                setattr(self, field, val)
                 if field not in self.fields and field not in coord_names:
                     self.fields.append(field)
         return self
@@ -552,7 +552,7 @@ class data(object):
                   skip=1, fill_value=np.nan, min_res=None, meta_only=False,
                   t_range=None,
                   group=None,
-                  verbose=False):
+                  verbose=False, **kwargs):
         """
         Make a pointCollection.grid.data from a gdal dataset.
 
