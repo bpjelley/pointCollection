@@ -615,7 +615,7 @@ class geoIndex(dict):
                     [np.min(all_y)-delta[1]/2, np.max(all_y)+delta[1]/2]]
 
         for file_key, result in query_results.items():
-            this_file, this_group = self.resolve_path(file_key, dir_root)
+            this_file = self.resolve_path(file_key, dir_root)
             try:
                 if not (os.path.isfile(this_file) or os.path.isfile(this_file.split(':')[0])):
                     print(f'geoIndex.get_data(): missing file {this_file}')
@@ -628,14 +628,14 @@ class geoIndex(dict):
                 elif result['type'] == 'h5_geoindex':
                     D=geoIndex().from_file(this_file).query_xy((result['x'], result['y']), fields=fields, get_data=True, dir_root=dir_root, error_action=error_action)
                 elif result['type'] == 'ATL06':
+                    this_file, pair = this_file.split(':pair')
                     if fields is None:
                         fields={None:(u'latitude',u'longitude',u'h_li',u'delta_time')}
-                    pair = this_group.replace('pair','')
                     D=[pc.ATL06.data(beam_pair=int(pair), fields=field_list, field_dict=field_dict).from_h5(\
                         filename=this_file, index_range=np.array(temp)) \
                         for temp in zip(result['offset_start'], result['offset_end'])]
                 elif result['type'] == 'ATL11':
-                    pair = this_group.replace('pair','')
+                    this_file, pair = this_file.split(':pair')
                     try:
                         D=[pc.ATL11.data().from_h5(\
                                 filename=this_file, index_range=np.array(temp), \
