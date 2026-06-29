@@ -552,6 +552,10 @@ class geoIndex(dict):
         string
             absolute path for the file to read
         """
+        # In some cases, the index points to a group in a file as filename:group
+        group=None
+        if ':' in filename:
+            filename, group = filename.split(':')
         if dir_root is None:
             dir_root=''
         self_dir_root=''
@@ -559,22 +563,22 @@ class geoIndex(dict):
             self_dir_root=self.attrs['dir_root']
         # if the filename begins with '/', it is absolute
         if filename is not None and filename[0]==os.path.sep:
-            return filename
+            return filename, group
         # if self.attrs['dir_root'] begins with '/', it is absolute, and overrides the dir_root argument
         if len(self_dir_root)>0 and self_dir_root==os.path.sep:
-            return os.path.join(self.attrs['dir_root'], filename)
+            return os.path.join(self.attrs['dir_root'], filename), group
         # if self.attrs['dir_root'] does not begin with a '/', it is relative
         if len(self_dir_root) > 0:
-            return os.path.join(dir_root, self.attrs['dir_root'], filename)
+            return os.path.join(dir_root, self.attrs['dir_root'], filename), group
         # if dir_root is provided, prepend it to the filename
         if len(dir_root) >0 and dir_root[0]==os.path.sep:
-            return os.path.join(dir_root,filename)
+            return os.path.join(dir_root,filename), group
         # otherwise, if len(dir_root) is 0 and self.attrs['dir_root'] is None,
         # assume that files are relative to the index path
         if self.filename is not None:
-            return os.path.join(os.path.dirname(self.filename), filename)
+            return os.path.join(os.path.dirname(self.filename), filename), group
         # if nothing has happened yet, return the filename
-        return filename
+        return filename, group
 
     def get_data(self, query_results, fields=None,  data=None, dir_root='',
                  bounds=None, function=None, error_action='warn'):
@@ -611,7 +615,7 @@ class geoIndex(dict):
                     [np.min(all_y)-delta[1]/2, np.max(all_y)+delta[1]/2]]
 
         for file_key, result in query_results.items():
-            this_file=self.resolve_path(file_key, dir_root)
+            this_file, this_group = self.resolve_path(file_key, dir_root)
             try:
                 if not (os.path.isfile(this_file) or os.path.isfile(this_file.split(':')[0])):
                     print(f'geoIndex.get_data(): missing file {this_file}')
@@ -626,21 +630,19 @@ class geoIndex(dict):
                 elif result['type'] == 'ATL06':
                     if fields is None:
                         fields={None:(u'latitude',u'longitude',u'h_li',u'delta_time')}
-                    D6_file, pair=this_file.split(':pair')
+                    pair = this_group.replace('pair','')
                     D=[pc.ATL06.data(beam_pair=int(pair), fields=field_list, field_dict=field_dict).from_h5(\
-                        filename=D6_file, index_range=np.array(temp)) \
+                        filename=this_file, index_range=np.array(temp)) \
                         for temp in zip(result['offset_start'], result['offset_end'])]
                 elif result['type'] == 'ATL11':
-                    D11_file, pair = this_file.split(':pair')
+                    pair = this_group.replace('pair','')
                     try:
-                        if not os.path.isfile(D11_file):
-                            print(D11_file)
                         D=[pc.ATL11.data().from_h5(\
-                                filename=D11_file, index_range=np.array(temp), \
+                                filename=this_file, index_range=np.array(temp), \
                                 pair=int(pair), field_dict=field_dict) \
                                 for temp in zip(result['offset_start'], result['offset_end'])]
                     except Exception as e:
-                        print(f"pointCollection.geoIndex: problem with ATL11 file:{D11_file} for beam pair {pair}.")
+                        print(f"pointCollection.geoIndex: problem with ATL11 file:{this_file} for beam pair {pair}.")
                         print("        Indexing information:")
                         print(result)
                         print("         Exception:")
