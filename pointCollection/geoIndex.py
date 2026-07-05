@@ -552,10 +552,6 @@ class geoIndex(dict):
         string
             absolute path for the file to read
         """
-        # In some cases, the index points to a group in a file as filename:group
-        group=None
-        if ':' in filename:
-            filename, group = filename.split(':')
         if dir_root is None:
             dir_root=''
         self_dir_root=''
@@ -563,22 +559,22 @@ class geoIndex(dict):
             self_dir_root=self.attrs['dir_root']
         # if the filename begins with '/', it is absolute
         if filename is not None and filename[0]==os.path.sep:
-            return filename, group
+            return filename
         # if self.attrs['dir_root'] begins with '/', it is absolute, and overrides the dir_root argument
         if len(self_dir_root)>0 and self_dir_root==os.path.sep:
-            return os.path.join(self.attrs['dir_root'], filename), group
+            return os.path.join(self.attrs['dir_root'], filename)
         # if self.attrs['dir_root'] does not begin with a '/', it is relative
         if len(self_dir_root) > 0:
-            return os.path.join(dir_root, self.attrs['dir_root'], filename), group
+            return os.path.join(dir_root, self.attrs['dir_root'], filename)
         # if dir_root is provided, prepend it to the filename
         if len(dir_root) >0 and dir_root[0]==os.path.sep:
-            return os.path.join(dir_root,filename), group
+            return os.path.join(dir_root,filename)
         # otherwise, if len(dir_root) is 0 and self.attrs['dir_root'] is None,
         # assume that files are relative to the index path
         if self.filename is not None:
-            return os.path.join(os.path.dirname(self.filename), filename), group
+            return os.path.join(os.path.dirname(self.filename), filename)
         # if nothing has happened yet, return the filename
-        return filename, group
+        return filename
 
     def get_data(self, query_results, fields=None,  data=None, dir_root='',
                  bounds=None, function=None, error_action='warn'):
