@@ -768,20 +768,48 @@ class data(object):
                     print("IndexError")
         return self.copy_attrs().from_dict(dd, fields=datasets)
 
-    def cropped(self, bounds, return_index=False, **kwargs):
+    def _crop_index(self, bounds):
+        """
+        Build a boolean index selecting points within per-dimension bounds.
+
+        Bounds may be given either as one 2-iterable of (min, max) per
+        dimension, in order matching self.coordinates (e.g. (XR, YR)), or
+        packed into a single iterable of iterables (e.g. [XR, YR]).
+        Trailing dimensions may be omitted, and any dimension's bounds may
+        be None, to leave that dimension uncropped.
+        """
+        if len(bounds) == 1 and isinstance(bounds[0][0], (list, tuple, np.ndarray)):
+            bounds = bounds[0]
+        if len(bounds) > len(self.coordinates):
+            raise ValueError(f"crop: got bounds for {len(bounds)} dimensions, "
+                              f"but self.coordinates has only {len(self.coordinates)}")
+        bounds = list(bounds) + [None] * (len(self.coordinates) - len(bounds))
+
+        ind = np.ones(getattr(self, self.coordinates[0]).shape, dtype=bool)
+        for coord, b in zip(self.coordinates, bounds):
+            if b is None:
+                continue
+            val = getattr(self, coord)
+            ind &= (val >= b[0]) & (val <= b[1])
+        return ind
+
+    def cropped(self, *bounds, return_index=False, **kwargs):
         """
         Return a cropped copy of an object
 
-        Returns a copy self for which
-            bounds[0][0] <= self.x <= bounds[0][1]
-            and
-            bounds[1][0] <= self.y <= bounds[1][1]
+        Returns a copy of self restricted to points for which each
+        coordinate in self.coordinates falls within the corresponding
+        range in bounds (e.g. bounds[0][0] <= self.x <= bounds[0][1] and
+        bounds[1][0] <= self.y <= bounds[1][1]).
 
         Parameters
         ----------
-        bounds : iterable
-            A list of two iterables containing the range of x values and y values
-            to include in the output.
+        *bounds : iterable
+            Bounds for each dimension in self.coordinates, given either as
+            separate arguments in order (e.g. cropped(XR, YR)) or packed
+            into a single iterable of iterables (e.g. cropped([XR, YR])).
+            Trailing dimensions may be omitted, and any dimension's bounds
+            may be None, to leave that dimension uncropped.
         return_index : bool, optional
             If True, return only the indices of the points within the bounds.
             The default is False.
@@ -794,41 +822,27 @@ class data(object):
             cropped version of the inptu data
 
         """
-
-        _x=getattr(self, self._x_coord)
-        ind = (_x >= bounds[0][0]) & (_x <= bounds[0][1])
-        if len(self.coordinates) >= 2:
-            _y=getattr(self, self._y_coord)
-            ind &= (_y >= bounds[1][0]) & (_y <= bounds[1][1])
+        ind = self._crop_index(bounds)
         if return_index:
             return ind
         return self.copy_subset(ind, **kwargs)
 
-    def crop(self, bounds):
+    def crop(self, *bounds):
         """
         Crop current object in place.
 
         Parameters
         ----------
-        bounds : iterable
-            A list of two iterables containing the range of x values and y values
-            to include in the output.
-        return_index : bool, optional
-            If True, return only the indices of the points within the bounds.
-            The default is False.
+        *bounds : iterable
+            Bounds for each dimension in self.coordinates. See `cropped`
+            for the accepted forms.
 
         Returns
         -------
         None
 
         """
-
-        _x=getattr(self, self._x_coord)
-        ind = (_x >= bounds[0][0]) & (_x <= bounds[0][1])
-        if len(self.coordinates) >= 2:
-            _y=getattr(self, self._y_coord)
-            ind &= (_y >= bounds[1][0]) & (_y <= bounds[1][1])
-        self.index(ind)
+        self.index(self._crop_index(bounds))
 
     def to_h5(self, fileOut=None,
               h5f_out=None,

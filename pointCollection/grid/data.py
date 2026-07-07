@@ -1915,7 +1915,7 @@ class data(object):
                 return self.copy(fields=fields).index(rc_ind[1], rc_ind[2], band_ind=rc_ind[0])
         return self.copy(fields=fields).index(rc_ind[0], rc_ind[1], band_ind=band_ind)
 
-    def crop(self, XR, YR=None, TR=None, fields=None):
+    def crop(self, XR=None, YR=None, TR=None, fields=None):
         '''
         Crop self to specified bounds inplace
 
@@ -1946,13 +1946,15 @@ class data(object):
             cropped version of self
 
         '''
-        if len(XR)==3 and TR is None:
-                TR = XR[2]
-                XR = XR[0:2]
-
-        if isinstance(XR[1], (list, tuple)) and YR is None:
-            YR = XR[1]
-            XR = XR[0]
+        # Bounds for all dimensions may be packed into a single argument instead
+        # of passed separately, e.g. crop([XR, YR]) or crop([XR, YR, TR]).
+        if XR is not None and YR is None and isinstance(XR[0], (list, tuple, np.ndarray)):
+            if len(XR) == 2:
+                XR, YR = XR
+            elif len(XR) == 3:
+                XR, YR, TR = XR
+            else:
+                raise ValueError('packed bounds must contain 2 (XR, YR) or 3 (XR, YR, TR) entries')
 
         if XR is not None:
             col_ind = np.flatnonzero((getattr(self, self._col_coord) >= XR[0]) & (getattr(self, self._col_coord) <= XR[1]))
