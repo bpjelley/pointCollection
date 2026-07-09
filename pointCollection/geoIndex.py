@@ -396,10 +396,10 @@ class geoIndex(dict):
         temp=pc.data().from_dict({'latitude':lat,'longitude':lon}).get_xy(SRS_proj4=self.attrs['SRS_proj4'])
         x=temp.x
         y=temp.y
-        delta=self.attribs['delta']
+        delta=self.attrs['delta']
         xb=np.round(x/delta[0])*delta[0]
         yb=np.round(y/delta[1])*delta[1]
-        return self.query_xy(xb, yb, get_data=get_data, fields=fields, error_action=error_action)
+        return self.query_xy([xb, yb], get_data=get_data, fields=fields, error_action=error_action)
 
     def query_xy_box(self, xr, yr, get_data=True, fields=None, dir_root='',
                      full_path=False, error_action='warn'):
@@ -726,7 +726,7 @@ class geoIndex(dict):
 
     def bin_latlon(self):
         xy_bin=self.bins_as_array()
-        temp=pc.data().from_dict({'x':xy_bin[:,0],'y':xy_bin[:,1]}).get_latlon(SRS_proj4=self.attrs['SRS_proj4'])
+        temp=pc.data().from_dict({'x':xy_bin[0],'y':xy_bin[1]}).get_latlon(SRS_proj4=self.attrs['SRS_proj4'])
 
         #internal_srs=osr.SpatialReference()
         #internal_srs.ImportFromProj4(self.attrs['SRS_proj4'])
