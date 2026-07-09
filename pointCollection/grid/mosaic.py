@@ -122,13 +122,14 @@ class mosaic(data):
     def setup_bounds_from_list(self, in_list,
                 group=None,
                 fields=None,
-                bounds=None):
+                bounds=None,
+                bands=None):
 
         for item in in_list.copy():
             if isinstance(item, str):
                 # read tile grid from file
                 try:
-                    temp=pc.grid.data().from_file(item, group=group, meta_only=True)
+                    temp=pc.grid.data().from_file(item, group=group, meta_only=True, bands=bands)
                     if bounds is not None:
                         temp=temp.cropped(*bounds)
                     if temp is not None and (len(temp.x)>0) and (len(temp.y) > 0):
@@ -142,6 +143,8 @@ class mosaic(data):
                     print(f"failed to read group {group} "+ str(item))
                     in_list.remove(item)
             else:
+                if bands is not None:
+                    item=item[:,:,bands]
                 if bounds is not None:
                     item=item.cropped(*bounds)
                 if item is not None and (len(item.x)>0) and (len(item.y) > 0):
@@ -157,7 +160,7 @@ class mosaic(data):
         self.__update_size_and_shape__()
 
 
-    def setup_fields(self, item, group=None, fields=None):
+    def setup_fields(self, item, group=None, fields=None, bands=None):
         '''
         Set up fields based on an input data item
         '''
@@ -166,8 +169,10 @@ class mosaic(data):
         # read data grid from the first tile HDF5, use it to set the field dimensions
 
         if isinstance(item, str):
-            prototype=pc.grid.mosaic().from_file(item, group=group, fields=fields)
+            prototype=pc.grid.mosaic().from_file(item, group=group, fields=fields, bands=bands)
         else:
+            if bands is not None:
+                item=item[:,:,bands]
             prototype=item
         if len(prototype.fields) == 0:
             message = f"pointCollection.grid.mosaic.py: did not find fields {fields} in file {prototype.filename}"
@@ -190,7 +195,7 @@ class mosaic(data):
         self.__update_size_and_shape__()
 
 
-    def replace(self, item, group=None, fields=None):
+    def replace(self, item, group=None, fields=None, bands=None):
         """
         Overwrite a section of the mosaic with an input file or mosaic
         """
@@ -199,8 +204,10 @@ class mosaic(data):
             fields=self.fields.copy()
         # read data grid from HDF5
         if isinstance(item, str):
-            temp=pc.grid.mosaic().from_file(item, group=group, fields=fields)
+            temp=pc.grid.mosaic().from_file(item, group=group, fields=fields, bands=bands)
         else:
+            if bands is not None:
+                item=item[:,:,bands]
             temp=item
         if not temp.overlaps(self):
             return
@@ -230,7 +237,7 @@ class mosaic(data):
 
 
     def add(self, item, fields, group=None, use_time=False,
-            pad=0, feather=0):
+            pad=0, feather=0, bands=None):
         """
         Add all bands from an item to a mosaic.
 
@@ -251,6 +258,8 @@ class mosaic(data):
             pad the weights by this distance. The default is 0.
         feather : float optional
             feather weights by this distance. The default is 0.
+        bands : iterable, optional
+            Bands to read from the item. The default is None (read all bands).
 
         Returns
         -------
@@ -264,8 +273,10 @@ class mosaic(data):
         self.normalized=False
         # read data grid from file
         if isinstance(item, str):
-            temp=pc.grid.mosaic().from_file(item, group=group, fields=fields)
+            temp=pc.grid.mosaic().from_file(item, group=group, fields=fields, bands=bands)
         else:
+            if bands is not None:
+                item=item[:,:,bands]
             if isinstance(item, self.__class__):
                 temp=item
             else:
@@ -535,6 +546,7 @@ class mosaic(data):
                   by_band=True,
                   verbose=False,
                   spacing=[None, None],
+                  bands=None,
                   ):
         """
         Generate a mosaic from a list of inputs.
@@ -560,6 +572,9 @@ class mosaic(data):
             Smooth blending length for inputs. The default is 0.
         group : str, optional
             group in hdf5 or netcdf4 files to read. The default is '/'.
+        bands : iterable, optional
+            Bands (e.g. time slices) to read from each input, in order. If
+            not specified, all bands in each input are read. The default is None.
 
         Returns
         -------
@@ -569,8 +584,8 @@ class mosaic(data):
         """
         weight = (pad is not None and pad > 0) or (feather is not None and feather>0)
 
-        self.setup_bounds_from_list(in_list, group=group, fields=fields, bounds=bounds)
-        message = self.setup_fields(in_list[0], group=group, fields=fields)
+        self.setup_bounds_from_list(in_list, group=group, fields=fields, bounds=bounds, bands=bands)
+        message = self.setup_fields(in_list[0], group=group, fields=fields, bands=bands)
         if message is not None:
             return message
         # check if using a weighted summation scheme for calculating mosaic
@@ -583,8 +598,11 @@ class mosaic(data):
                 for band in band_list:
                     self.invalid = np.ones(self.dimensions[0:2],dtype=bool)
                     self.weight = np.zeros((self.dimensions[0],self.dimensions[1]))
+                    # if specific input bands were requested, map the output
+                    # band index back to the corresponding input band
+                    in_band = bands[band] if (bands is not None and band is not None) else band
                     for item in in_list:
-                        self.add_to_band(item, group=group, fields=fields, pad=pad, feather=feather, band=band)
+                        self.add_to_band(item, group=group, fields=fields, pad=pad, feather=feather, in_band=in_band, out_band=band)
                     self.normalize(band=band)
             else:
                 self.invalid = np.ones(self.dimensions[0:2],dtype=bool)
@@ -592,7 +610,7 @@ class mosaic(data):
                 # for each file in the list
                 for item in in_list:
                     try:
-                        self.add(item, group=group, fields=fields, pad=pad, feather=feather)
+                        self.add(item, group=group, fields=fields, pad=pad, feather=feather, bands=bands)
                     except Exception as e:
                         print(f"mosaic.from_list : problem with {item} for group={group} and fields={fields}")
                         print(e)
@@ -602,7 +620,7 @@ class mosaic(data):
             # for each file in the list
             self.invalid = np.ones(self.dimensions[0:2],dtype=bool)
             for item in in_list:
-                self.replace(item, group=group, fields=fields)
+                self.replace(item, group=group, fields=fields, bands=bands)
             self.normalize(by_weight=False)
 
         return self
