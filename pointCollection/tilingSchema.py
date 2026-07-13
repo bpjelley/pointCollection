@@ -41,7 +41,7 @@ class tilingSchema(object):
         self.scale = scale
         self.data_format = 'indexedH5'
         self.directory = directory
-        self.tile_offset = tile_offset,
+        self.tile_offset = tile_offset
         self.mapping_function = mapping_function
 
     def set_mapping_function(self, mapping_function_name=None):
