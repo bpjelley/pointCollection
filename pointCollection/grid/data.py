@@ -6,7 +6,8 @@ Created on Sat Dec 22 15:35:13 2018
 @author: ben
 """
 
-from osgeo import gdal, gdalconst, osr, ogr
+
+
 import numpy as np
 
 import re
@@ -15,9 +16,6 @@ import os
 import bz2
 import gzip
 import uuid
-import h5py
-import pyproj
-import netCDF4
 import posixpath
 #from scipy.interpolate import RegularGridInterpolator
 #from scipy.stats import scoreatpercentile
@@ -43,7 +41,11 @@ class data(object):
     as 'upside down' in some plotting routines.
     """
 
-    def __init__(self, fields=None, fill_value=np.nan, t_axis=2):
+    def __init__(self,
+                 fields=None,
+                 fill_value=np.nan,
+                 t_axis=2,
+                 coordinates=None):
         self.x=None
         self.y=None
         self.projection=None
@@ -55,10 +57,18 @@ class data(object):
         self.fill_value=fill_value
         self.size=None
         self.shape=None
-        self.t_axis=t_axis
+        self._t_axis=t_axis
         self.xform=None
         self.srs_epsg=None
         self.srs_proj4=None
+        if coordinates is not None:
+            self.coordinates = coordinates
+        elif self._t_axis==2:
+            self.coordinates = ['y','x','time']
+        elif self._t_axis==0:
+            self.coordinates = ['time', 'y', 'x']
+        else:
+            self.coordinates = ['y','x']
         self._time=None
         self._spacing=[None, None]
         if fields is None:
@@ -71,19 +81,23 @@ class data(object):
     @property
     def spacing(self):
         try:
-            return [self.x[1]-self.x[0], self.y[1]-self.y[0]]
+            col = getattr(self, self._col_coord)
+            row = getattr(self, self._row_coord)
+            return [col[1]-col[0], row[1]-row[0]]
         except Exception:
             return self._spacing
     @spacing.setter
     def spacing(self, val):
         self._spacing=val
         return
+
     @property
     def t(self):
         return self._time
     @t.setter
     def t(self, value):
         self._time = value
+
     @property
     def time(self):
         return self._time
@@ -97,14 +111,60 @@ class data(object):
         return {'extent':self.img_extent,
                 'origin':'lower'}
 
+    @property
+    def t_axis(self):
+        return self._t_axis
+
+    @t_axis.setter
+    def t_axis(self, val):
+        self._t_axis = val
+
+    @property
+    def _row_coord(self):
+        """Name of the row (first spatial) coordinate; default 'y'."""
+        if self.coordinates:
+            if len(self.coordinates) == 3 and self._t_axis == 0:
+                return self.coordinates[1]
+            return self.coordinates[0]
+        return 'y'
+
+    @property
+    def _col_coord(self):
+        """Name of the column (second spatial) coordinate; default 'x'."""
+        if self.coordinates:
+            if len(self.coordinates) == 3 and self._t_axis == 0:
+                return self.coordinates[2]
+            if len(self.coordinates) >= 2:
+                return self.coordinates[1]
+        return 'x'
+
+    @property
+    def _band_coord(self):
+        """Name of the band (time-like) coordinate; None for 2-D data."""
+        if self.coordinates and len(self.coordinates) == 3:
+            return self.coordinates[self._t_axis]
+        return None
+
     def __copy__(self, fields=None):
         """Return a copy of a grid, optionally with a subset of fields."""
         if fields is None:
             fields=self.fields
         temp=pc.grid.data()
-        for field in ['x','y','projection','filename','extent','time', 't', 't_axis']:
+        for field in ['projection','filename','extent','img_extent',
+                      'coordinates','_t_axis','xform','srs_epsg','srs_proj4']:
             if hasattr(self, field):
                 setattr(temp, field, getattr(self, field))
+        for coord_name in (self.coordinates or []):
+            val = getattr(self, coord_name, None)
+            if val is not None:
+                setattr(temp, coord_name, val)
+        for field in ['x', 'y']:
+            if field not in (self.coordinates or []):
+                val = getattr(self, field, None)
+                if val is not None:
+                    setattr(temp, field, val)
+        if self._time is not None:
+            temp._time = self._time
         for field in fields:
             if hasattr(self, field):
                 setattr(temp, field, getattr(self, field).copy())
@@ -122,66 +182,80 @@ class data(object):
 
     def copy(self, fields=None):
         """Return a copy of the current dataset."""
-        return self.__copy__()
+        return self.__copy__(fields=fields)
 
     def copy_meta(self):
         """Return an empty dataset matching the current dataset."""
         temp=pc.grid.data()
-        for field in ['x','y','projection','filename','extent','time', 't', 't_axis']:
+        for field in ['projection','filename','extent','img_extent',
+                      'coordinates','_t_axis','xform','srs_epsg','srs_proj4']:
             if hasattr(self, field):
                 setattr(temp, field, getattr(self, field))
+        for coord_name in (self.coordinates or []):
+            val = getattr(self, coord_name, None)
+            if val is not None:
+                setattr(temp, coord_name, val)
+        for field in ['x', 'y']:
+            if field not in (self.coordinates or []):
+                val = getattr(self, field, None)
+                if val is not None:
+                    setattr(temp, field, val)
+        if self._time is not None:
+            temp._time = self._time
         temp.__update_size_and_shape__()
         temp.__update_extent__()
         return temp
 
-    def __getitem__(self, *args, **kwargs):
-        """Return a subset of the data."""
-        return self.copy_subset(*args, **kwargs)
+    def __getitem__(self, key, **kwargs):
+        """Return a field by name or a spatial subset of the data."""
+        if isinstance(key, str):
+            if key not in self.fields and not hasattr(self, key):
+                raise KeyError(f"{key!r} is not a field in this grid")
+            return getattr(self, key)
+        return self.copy_subset(key, **kwargs)
 
     def __update_extent__(self):
         """Update the extent of the data to match its x and y fields."""
         try:
-            self.extent=[np.min(self.x), np.max(self.x), np.min(self.y), np.max(self.y)]
-            if len(self.x)>1:
-                hdx=np.abs(self.x[1]-self.x[0])/2
+            col = getattr(self, self._col_coord)
+            row = getattr(self, self._row_coord)
+            self.extent=[np.min(col), np.max(col), np.min(row), np.max(row)]
+            if len(col)>1:
+                hdx=np.abs(col[1]-col[0])/2
             else:
                 hdx=0
-            if len(self.y)>1:
-                hdy=np.abs(self.y[1]-self.y[0])/2
+            if len(row)>1:
+                hdy=np.abs(row[1]-row[0])/2
             else:
                 hdy=0
-            self.img_extent=[np.min(self.x)-hdx, np.max(self.x)+hdx, np.min(self.y)-hdy, np.max(self.y)+hdy]
-        except ValueError:
-            # usually happens when self.x or self.y is empty
+            self.img_extent=[np.min(col)-hdx, np.max(col)+hdx, np.min(row)-hdy, np.max(row)+hdy]
+        except (ValueError, TypeError):
+            # usually happens when coordinates are empty or None
             self.extent=[None, None, None, None]
 
     def __update_size_and_shape__(self):
         """Update the size and shape parameters of the object to match that of its data fields."""
-        if hasattr(self, 'dimensions') and self.dimensions is not None and self.dimensions[0] is not None:
-            self.shape=self.dimensions.copy()
-            self.size=np.prod(self.shape)
-            return
-        elif hasattr(self, 'x') and self.x is not None and hasattr(self,'y') and self.y is not None:
-            self.shape=[len(self.y), len(self.x)]
-            if hasattr(self, 't') and self.t is not None:
-                try:
-                    self.shape += [len(self.t)]
-                except TypeError:
-                    pass
-            elif hasattr(self, 'time') and self.time is not None:
-                try:
-                    self.shape += [len(self.time)]
-                except TypeError:
-                    pass
-            self.size =np.prod(self.shape)
-            return
-        for field in ['z']+self.fields:
+
+        if self.coordinates is not None and self.coordinates[0] is not None:
+            coords = self.coordinates.copy()
+        else:
+            coords = ['y', 'x', 'time']
+        self.shape = []
+        for coord in coords:
             try:
-                self.size=getattr(self, field).size
-                self.shape=getattr(self, field).shape
-                break
-            except Exception:
+                self.shape.append(len(getattr(self, coord)))
+            except (AttributeError, TypeError):
                 pass
+        if not self.shape:
+            # haven't found any coordinates.  Try to get shape from the fields
+            for field in ['z']+self.fields:
+                try:
+                    self.size=getattr(self, field).size
+                    self.shape=getattr(self, field).shape
+                    break
+                except Exception:
+                    pass
+        self.size=np.prod(self.shape)
 
     def summary(self, return_table=True, return_dict=False):
          """
@@ -233,12 +307,13 @@ class data(object):
             Dictionary of spatial grid variables, should contain fields 'x','y',
             and optionally 'time' or 't'
         """
+        coord_names = set(self.coordinates or []) | {'x', 'y', 'time', 't'}
         for field in thedict:
-            if field in ['t','time']:
+            if field in ('t', 'time'):
                 self._time = thedict[field]
             else:
                 setattr(self, field, thedict[field])
-                if field not in self.fields and field not in ['x','y','time', 't']:
+                if field not in self.fields and field not in coord_names:
                     self.fields.append(field)
         self.__update_extent__()
         self.__update_size_and_shape__()
@@ -252,15 +327,18 @@ class data(object):
             newdata=dict()
         if len(kwargs) > 0:
             newdata |= kwargs
-        for field in newdata.keys():
-            if field in ['t','time']:
+        coord_names = set(self.coordinates or []) | {'x', 'y', 'time', 't'}
+        for field, val in newdata.items():
+            if isinstance(val, (float, int)):
+                # allow assign(x=0) to produce x = np.zeros(self.shape)
+                val = np.zeros(self.shape) + val
+            if field in ('t', 'time'):
                 self._time=newdata[field]
             else:
-                setattr(self, field, newdata[field])
-                if field not in self.fields and field not in ['x','y','time','t']:
+                setattr(self, field, val)
+                if field not in self.fields and field not in coord_names:
                     self.fields.append(field)
         return self
-
 
     def bounds_and_spacing_for_list(self, D_list, spacing_from='last'):
         xmin,xmax,ymin,ymax = [np.inf,-np.inf,np.inf,-np.inf]
@@ -282,7 +360,7 @@ class data(object):
                     if spacing[0] is None or spacing_from=='last':
                         spacing =this_spacing
                     elif spacing_from=='min':
-                        spacing = np.minumum(spacing, this_spacing)
+                        spacing = np.minimum(spacing, this_spacing)
                     elif spacing_from=='max':
                         spacing = np.maximum(spacing, this_spacing)
 
@@ -323,12 +401,14 @@ class data(object):
         # calculate x and y dimensions with new extents
         nx = np.int64((xmax - xmin)/spacing[0]) + 1
         ny = np.int64((ymax - ymin)/spacing[1]) + 1
-        # calculate x and y arrays
-        self.x = np.arange(xmin, xmax+0.1*spacing[0], spacing[0])
-        self.y = np.arange(ymin, ymax+0.1*spacing[1], spacing[1])
+        # calculate coordinate arrays
+        setattr(self, self._col_coord, np.arange(xmin, xmax+0.1*spacing[0], spacing[0]))
+        setattr(self, self._row_coord, np.arange(ymin, ymax+0.1*spacing[1], spacing[1]))
         # try to extract times
         time = np.zeros((nt))
         i = 0
+        # default time field name is 'time'
+        time_field='time'
         for D in D_list:
             try:
                 ntime = D.shape[D.t_axis]
@@ -338,7 +418,7 @@ class data(object):
             if hasattr(D,'time') and D.time is not None:
                 time[i:i+ntime] = D.time
                 time_field='time'
-            elif hasattr(D,'t'):
+            elif hasattr(D,'t') and D.t is not None:
                 time[i:i+ntime] = D.t
                 time_field='t'
             i += ntime
@@ -367,8 +447,8 @@ class data(object):
                     try:
                         assert(np.all(np.array(self.spacing)==np.array(D.spacing)))
                         # calculate grid coordinates for merging fields
-                        iy = np.array((D.y[:,None]-ymin)/spacing[1],dtype=int)
-                        ix = np.array((D.x[None,:]-xmin)/spacing[0],dtype=int)
+                        iy = np.array((getattr(D, D._row_coord)[:,None]-ymin)/spacing[1],dtype=int)
+                        ix = np.array((getattr(D, D._col_coord)[None,:]-xmin)/spacing[0],dtype=int)
                         if (D.t_axis == 0):
                             temp = np.zeros((ntime,ny,nx))
                             temp[:,iy,ix] = getattr(D,field)
@@ -378,9 +458,9 @@ class data(object):
                     except AssertionError:
                         if D.t is not None:
                             temp = np.atleast_3d(
-                                D.interp(self.x, self.y, np.atleast_1d(D.t), field=field, gridded=True))
+                                D.interp(getattr(self, self._col_coord), getattr(self, self._row_coord), np.atleast_1d(D.t), field=field, gridded=True))
                         else:
-                            temp = np.atleast_3d(D.interp(self.x, self.y, field=field, gridded=True))
+                            temp = np.atleast_3d(D.interp(getattr(self, self._col_coord), getattr(self, self._row_coord), field=field, gridded=True))
                     # merge fields
                     if (t_axis == 0) and (D.t_axis == 0):
                         data_field[i:i+ntime,:,:] = temp[:]
@@ -448,6 +528,7 @@ class data(object):
             - ``'year'``: WorldView year from filename
             - ``'matlab'``: WorldView matlab date from filename
         """
+        from osgeo import gdal, gdalconst
         self.filename=file
         if date_format is not None:
             try:
@@ -470,7 +551,8 @@ class data(object):
     def from_gdal(self, ds, field='z', bands=None, bounds=None, extent=None,
                   skip=1, fill_value=np.nan, min_res=None, meta_only=False,
                   t_range=None,
-                  verbose=False):
+                  group=None,
+                  verbose=False, **kwargs):
         """
         Make a pointCollection.grid.data from a gdal dataset.
 
@@ -497,6 +579,7 @@ class data(object):
             read bands that have metadata 'time' values between t_range[0] and t_range[1]
         meta_only : return raster extent without reading data
         verbose:  if true, report errors, etc
+        group: keyword will be ignored
         Raises
         ------
         AttributeError
@@ -610,6 +693,8 @@ class data(object):
             - ``'bzip'``
             - ``'gzip'``
         """
+        # lazy import of h5py
+        import h5py
         if (compression is None):
             return h5py.File(h5_file,mode=mode)
         elif (compression == 'bzip'):
@@ -625,37 +710,40 @@ class data(object):
                 fid.seek(0)
                 return h5py.File(fid, 'r')
 
-    def select_slices(self, bounds, x, y, bands):
+    def select_slices(self, bounds, x, y, bands, skip=1):
         # get orientation of y-axis
         yorient = np.sign(y[1] - y[0])
+        col_key = self._col_coord
+        row_key = self._row_coord
+        band_key = self._band_coord or 'time'
 
         # reduce raster to bounds and orient to lower
         slices={}
         if (bounds is not None) and (yorient > 0):
             # indices to read
             xind, = np.nonzero((x >= bounds[0][0]) & (x <= bounds[0][1]))
-            slices['x'] = slice(xind[0],xind[-1],1)
+            slices[col_key] = slice(xind[0],xind[-1]+1,skip)
             yind, = np.nonzero((y >= bounds[1][0]) & (y <= bounds[1][1]))
-            slices['y'] = slice(yind[0],yind[-1],1)
+            slices[row_key] = slice(yind[0],yind[-1]+1,skip)
         elif (bounds is not None) and (yorient < 0):
             # indices to read with reversed y
             xind, = np.nonzero((x >= bounds[0][0]) & (x <= bounds[0][1]))
-            slices['x'] = slice(xind[0],xind[-1],1)
+            slices[col_key] = slice(xind[0],xind[-1]+1,skip)
             yind, = np.nonzero((y >= bounds[1][0]) & (y <= bounds[1][1]))
-            slices['y'] = slice(yind[-1],yind[0],-1)
+            slices[row_key] = slice(yind[-1],yind[0]-1 if yind[0] > 0 else None,-skip)
         elif (yorient < 0):
             # indices to read (all) with reversed y
-            slices['x'] = slice(None,None,1)
-            slices['y'] = slice(None,None,-1)
+            slices[col_key] = slice(None,None,skip)
+            slices[row_key] = slice(None,None,-skip)
         else:
             # indices to read (all)
-            slices['x'] = slice(None,None,1)
-            slices['y'] = slice(None,None,1)
+            slices[col_key] = slice(None,None,skip)
+            slices[row_key] = slice(None,None,skip)
 
         if bands is None:
-            slices['time'] = slice(None)
+            slices[band_key] = slice(None)
         else:
-            slices['time'] = list(bands)
+            slices[band_key] = list(bands)
         return slices, yorient
 
     def choose_bands_by_time(self, t=None, bounds=None, t_range=None):
@@ -680,6 +768,10 @@ class data(object):
             range of time values to be read.
 
         """
+
+        if t is None:
+            t=self.time
+
         bands=None
         if bounds is not None and len(bounds)==3:
             if self.t_axis==0:
@@ -689,11 +781,35 @@ class data(object):
                 t_range=bounds[2]
                 bounds=bounds[:2]
 
-        if t_range is not None:
+        if t_range is not None and t is not None:
             bands = np.flatnonzero((t>=t_range[0]) & (t<=t_range[1]))
 
         return bands, t_range
 
+    def select_fields(self, fields=None):
+        """
+        retain a list of fields in the current object
+
+        Parameters
+        ----------
+        fields : TYPE, iterable
+            Fields to retain. Fields not in the list will be dropped. The default is None.
+
+        Returns
+        -------
+        None.
+
+        """
+        if fields is None:
+            return
+        self_fields = self.fields.copy()
+        for field in set(self_fields):
+            if field not in fields:
+                self.fields.remove(field)
+                try:
+                    delattr(self, field)
+                except AttributeError:
+                    pass
 
     def read_data(self, src, i0, i1, bands):
         """
@@ -740,7 +856,8 @@ class data(object):
         meta_only=False,
         bounds=None,  skip=1, fill_value=None,
         t_axis=None, t_range=None, bands=None,
-        compression=None, swap_xy=False, source_fillvalue=None):
+        compression=None, swap_xy=False, source_fillvalue=None,
+        coord_mapping=None):
         """
         Read a raster from an HDF5 file.
 
@@ -789,7 +906,7 @@ class data(object):
             pc.grid.data object containing the map data.
         """
         if t_axis is not None:
-            self.t_axis=t_axis
+            self.t_axis = t_axis
         if fill_value is not None:
             self.fill_value = fill_value
         if fields is None and field is not None:
@@ -797,7 +914,11 @@ class data(object):
         if field_mapping is None:
             field_mapping={}
         self.filename=h5_file
-        dims=[xname,yname,'t','time']
+        if coord_mapping is None:
+            coord_mapping = {xname: self._col_coord,
+                             yname: self._row_coord,
+                             timename: self._band_coord or 'time'}
+        dims = [xname, yname, 't', 'time'] + list(self.coordinates or [])
         if not group.startswith('/'):
             group='/'+group
         t=None
@@ -808,8 +929,8 @@ class data(object):
         #default
         yorient=1
         with self.h5_open(h5_file, mode='r', compression=compression) as h5f:
-            x=np.array(h5f[group][xname]).ravel()
-            y=np.array(h5f[group][yname]).ravel()
+            x = np.array(h5f[group][xname]).ravel()
+            y = np.array(h5f[group][yname]).ravel()
             for time_var_name in set(['time','t', timename]):
                 if time_var_name in h5f[group].keys():
                     try:
@@ -848,9 +969,9 @@ class data(object):
             if bounds is not None:
                 # indices to read
                 xind, = np.nonzero((x >= bounds[0][0]) & (x <= bounds[0][1]))
-                cols = slice(xind[0],xind[-1], skip)
+                cols = slice(xind[0],xind[-1]+1, skip)
                 yind, = np.nonzero((y >= bounds[1][0]) & (y <= bounds[1][1]))
-                rows = slice(yind[0],yind[-1], skip)
+                rows = slice(yind[0],yind[-1]+1, skip)
             else:
                 # indices to read (all)
                 rows = slice(None,None, skip)
@@ -873,7 +994,7 @@ class data(object):
                     nT=len(src_t)
                 except TypeError:
                     nT=1
-            if t_axis==0:
+            if self.t_axis == 0:
                 default_shape_3d = [nT] + default_shape_2d
             else:
                 default_shape_3d = default_shape_2d + [nT]
@@ -889,9 +1010,13 @@ class data(object):
                     if f_field.shape in [tuple(default_shape_3d), tuple(default_shape_2d) ]:
                         z=self.read_data(f_field, i0, i1, bands)
                     elif src_t is not None and len(f_field)==np.prod(default_shape_3d):
+                        # special case: 3d data have been raveled.
+                        # Read the whole dataset and reshape to 3d array
                         z=self.read_data(np.array(f_field).reshape(default_shape_3d), i0, i1, bands)
                     elif len(f_field)==np.prod(default_shape_2d):
-                        z=self.read_data(np.array(f_field).reshape(default_shape_3d), i0, i1, bands)
+                        # special case: 2d data have been raveled.
+                        # Read the whole dataset and reshape to 2d array
+                        z=self.read_data(np.array(f_field).reshape(default_shape_2d), i0, i1, bands)
                     else:
                         raise(IndexError(f'from filename {h5_file}, field {f_field_name} has shape:{f_field.shape} incompatible with data shape:{default_shape_3d}.'))
 
@@ -933,13 +1058,18 @@ class data(object):
                     if self_field not in self.fields:
                         self.fields.append(self_field)
 
-            self.x=x[cols]
-            self.y=y[rows]
+            setattr(self, coord_mapping.get(xname, self._col_coord), x[cols])
+            row_arr = y[rows]
             if yorient==-1:
-                y=y[::-1]
+                row_arr = row_arr[::-1]
+            setattr(self, coord_mapping.get(yname, self._row_coord), row_arr)
 
             if t is not None:
-                self.t=t
+                t_dest = coord_mapping.get(timename, self._band_coord or 'time')
+                if t_dest in ('t', 'time'):
+                    self._time = t
+                else:
+                    setattr(self, t_dest, t)
             # try to retrieve grid mapping and add to projection
             if grid_mapping_name is not None:
                 self.projection = {}
@@ -970,6 +1100,7 @@ class data(object):
             - ``'bzip'``
             - ``'gzip'``
         """
+        import netCDF4
         if (compression is None):
             return netCDF4.Dataset(nc_file, mode=mode)
         elif (compression == 'bzip'):
@@ -1036,7 +1167,7 @@ class data(object):
         self
             pc.grid.data object containing the map data.
         """
-        dim_names={xname:'x',yname:'y', timename:'time'}
+        dim_names={xname: self._col_coord, yname: self._row_coord, timename: self._band_coord or 'time'}
 
         if t_axis is not None:
             self.t_axis=t_axis
@@ -1052,7 +1183,7 @@ class data(object):
         if field_mapping is None:
             field_mapping={}
         self.filename=nc_file
-        dims=[xname,yname,'t','time']
+        dims=[xname, yname, 't', 'time'] + list(self.coordinates or [])
         t=None
         grid_mapping_name = None
         with self.nc_open(nc_file,mode='r',compression=compression) as fileID:
@@ -1068,7 +1199,7 @@ class data(object):
                     t=ncf.variables[this_time_var_name][:].copy()
                     timename=this_time_var_name
                     break
-            dim_names={xname:'x',yname:'y', timename:'time'}
+            dim_names={xname: self._col_coord, yname: self._row_coord, timename: self._band_coord or 'time'}
 
             if bands is None:
                 bands, t_range = self.choose_bands_by_time(t=t, bounds=bounds, t_range=t_range)
@@ -1092,9 +1223,9 @@ class data(object):
                         if hasattr(var,'shape') and var.shape:
                             field_mapping.update({key:key})
 
-            slices=self.select_slices(bounds, x, y, bands)[0]
+            slices=self.select_slices(bounds, x, y, bands, skip=skip)[0]
             # check that raster can be sliced
-            if len(x[slices['x']]) == 0 or len(y[slices['y']]) == 0:
+            if len(x[slices[self._col_coord]]) == 0 or len(y[slices[self._row_coord]]) == 0:
                 self.__update_extent__()
                 self.__update_size_and_shape__()
                 return self
@@ -1108,13 +1239,12 @@ class data(object):
                 # establish the order of output dimensions for this field
                 # based on the time-axis dimension and the number of dimensions
                 if len(f_field.shape)==2:
-                    out_dims=['y','x']
+                    out_dims=[self._row_coord, self._col_coord]
                 else:
-                    # N.B.  In the next lines, just changed timename to 'time'
                     if self.t_axis==2:
-                        out_dims=['y', 'x', 'time']
+                        out_dims=[self._row_coord, self._col_coord, self._band_coord or 'time']
                     else:
-                        out_dims=['time','y','x']
+                        out_dims=[self._band_coord or 'time', self._row_coord, self._col_coord]
                 if f_field.dimensions is None:
                     f_dims = out_dims
                 else:
@@ -1146,10 +1276,14 @@ class data(object):
                 self.assign({self_field:z})
 
             # reduce x and y to bounds
-            self.x=x[slices['x']]
-            self.y=y[slices['y']]
+            setattr(self, self._col_coord, x[slices[self._col_coord]])
+            setattr(self, self._row_coord, y[slices[self._row_coord]])
             if t is not None:
-                self.t=t
+                band_name = self._band_coord or 'time'
+                if band_name in ('t', 'time'):
+                    self._time = t
+                else:
+                    setattr(self, band_name, t)
             # try to retrieve grid mapping and add to projection
             if grid_mapping_name is not None:
                 self.projection = {}
@@ -1162,13 +1296,23 @@ class data(object):
         self.__update_size_and_shape__()
         return self
 
-    def to_h5(self, out_file, fields=None, group='/', replace=False, nocompression=False, attributes={}, fill_value=None, overwrite_coords=False,  **kwargs):
+    def to_h5(self, out_file, fields=None, group='/', replace=False,
+              nocompression=False,
+              attributes=None,
+              fill_value=None,
+              overwrite_coords=False,
+              VERBOSE=False,
+              **kwargs):
+        # lazy import of h5py
+        import h5py
         """Write a grid data object to an hdf5 file."""
         kwargs.setdefault('srs_proj4', None)
         kwargs.setdefault('srs_wkt', None)
         kwargs.setdefault('srs_epsg', None)
         kwargs.setdefault('dimensions', {})
         kwargs.setdefault('grid_mapping_name', 'crs')
+        if attributes is None:
+            attributes={}
         # check whether overwriting existing files
         # append to existing files as default
         mode = 'w' if replace else 'a'
@@ -1205,11 +1349,12 @@ class data(object):
             except Exception:
                 pass
 
-            for field in ['x','y','time', 't'] + fields:
+            coord_fields = list(self.coordinates) if self.coordinates else ['x','y','time']
+            for field in coord_fields + fields:
                 f_field_name = posixpath.join(group,field)
                 # if field exists, and overwrite_coords is True, overwrite it
                 if field in h5f[group]:
-                    if field in ['x','y','time', 't']:
+                    if field in coord_fields:
                         if overwrite_coords:
                             if hasattr(self, field):
                                 temp=getattr(self, field)
@@ -1220,7 +1365,7 @@ class data(object):
                 else:
                     #Otherwise, try to create the dataset
                     try:
-                        if nocompression or field in ['x','y','time']:
+                        if nocompression or field in coord_fields:
                             h5f.create_dataset(f_field_name, data=getattr(self, field))
                         else:
                             h5f.create_dataset(f_field_name, data=getattr(self, field),
@@ -1231,22 +1376,27 @@ class data(object):
                 try:
                     for att_name,att_val in attributes[field].items():
                         h5f[f_field_name].attrs[att_name] = att_val
-                except Exception:
+                except Exception as exc:
+                    if VERBOSE:
+                        print(f"failed to sef field attributes, with exception {exc}")
                     pass
                 # try adding dimensions
                 try:
-                    if field in ['x','y','time', 't'] and any(kwargs['dimensions']):
+                    if field in coord_fields and any(kwargs['dimensions']):
                         h5f[f_field_name].make_scale(field)
                     elif any(kwargs['dimensions']):
                         for i,dim in enumerate(kwargs['dimensions'][f_field_name]):
                             h5f[f_field_name].dims[i].attach_scale(h5f[dim])
                 except Exception as exc:
+                    if VERBOSE:
+                        print(f"failed to set dimensions with exception {exc}")
                     pass
-            # add crs attributes if applicable
+                # add crs attributes if applicable
+                if self.crs:
+                    # add grid mapping attribute
+                    if field not in coord_fields:
+                        h5f[f_field_name].attrs['grid_mapping'] = kwargs['grid_mapping_name']
             if self.crs:
-                # add grid mapping attribute to each grid field
-                for field in fields:
-                    h5f[f_field_name].attrs['grid_mapping'] = kwargs['grid_mapping_name']
                 # add grid mapping variable with projection attributes
                 h5crs = h5f.create_dataset(kwargs['grid_mapping_name'], (), dtype=np.byte)
                 for att_name,att_val in self.crs.items():
@@ -1257,8 +1407,10 @@ class data(object):
 
 
     def to_nc(self, out_file, fields=None, group='', replace=False, time_name='time',
-              nocompression=False,
-              attributes={}, fill_value=None, **kwargs):
+              nocompression = False,
+              attributes = None,
+              fill_value =None,
+              **kwargs):
         """Write a grid data object to a netCDF4 file."""
         kwargs.setdefault('srs_proj4', None)
         kwargs.setdefault('srs_wkt', None)
@@ -1266,6 +1418,9 @@ class data(object):
         kwargs.setdefault('grid_mapping_name', 'crs')
         kwargs.setdefault('xy_units', 'meter')
         kwargs.setdefault('t_units', None)
+
+        if attributes is None:
+            attributes = {}
 
         # check whether overwriting existing files
         # append to existing files as default
@@ -1275,8 +1430,12 @@ class data(object):
             fields=self.fields
         # try getting the time variable name
         try:
-            t_name = [field for field in ('t','time') if hasattr(self, field)
-                and np.any(getattr(self,field))].pop()
+            band_coord = self._band_coord
+            if band_coord is not None and getattr(self, band_coord, None) is not None:
+                t_name = band_coord
+            else:
+                t_name = [field for field in ('t', 'time')
+                          if getattr(self, field, None) is not None].pop()
         except Exception:
             t_name = None
 
@@ -1284,6 +1443,7 @@ class data(object):
         if fill_value is not None:
             self.replace_invalid(fields=fields, fill_value=fill_value)
 
+        import netCDF4
         # get crs attributes
         self.crs_attributes(**kwargs)
         with netCDF4.Dataset(out_file,mode) as fileID:
@@ -1308,29 +1468,32 @@ class data(object):
                     pass
 
             # for each dimension variable
-            for field in ['x','y', time_name]:
-                # if field exists, overwrite it
-                if field in ncf.variables.keys() and hasattr(self, field):
-                    var = getattr(self, field)
-                    if var is not None:
-                        ncf.variables[field][:] = var
-                elif hasattr(self, field):
-                    var = getattr(self, field)
-                    if var is not None:
-                        ncf.createDimension(field, len(np.atleast_1d(var)))
-                        this_var = ncf.createVariable(field, var.dtype, (field,))
-                        if field in ['x','y']:
-                            this_var.units = kwargs['xy_units']
-                        if field in ['t','time'] and kwargs['t_units'] is not None:
-                            this_var.units = kwargs['t_units']
-                        ncf.variables[field][:] = var
+            row_name = self._row_coord
+            col_name = self._col_coord
+            spatial_coord_names = {row_name, col_name, 'x', 'y'}
+            time_coord_names = {'t', 'time'}
+            write_coords = [col_name, row_name] + ([t_name] if t_name else [])
+            for field in write_coords:
+                var = getattr(self, field, None)
+                if var is None:
+                    continue
+                if field in ncf.variables.keys():
+                    ncf.variables[field][:] = var
+                else:
+                    ncf.createDimension(field, len(np.atleast_1d(var)))
+                    this_var = ncf.createVariable(field, var.dtype, (field,))
+                    if field in spatial_coord_names:
+                        this_var.units = kwargs['xy_units']
+                    if field in time_coord_names and kwargs['t_units'] is not None:
+                        this_var.units = kwargs['t_units']
+                    ncf.variables[field][:] = var
             for field in fields:
                 if (self.t_axis == 2) and t_name is not None:
-                    nc_dim=('y','x',t_name,)
+                    nc_dim=(row_name, col_name, t_name,)
                 elif (self.t_axis == 0) and t_name is not None:
-                    nc_dim=(t_name,'y','x',)
+                    nc_dim=(t_name, row_name, col_name,)
                 else:
-                    nc_dim=('y','x',)
+                    nc_dim=(row_name, col_name,)
                 # if field exists, overwrite it
                 if field in ncf.variables.keys() and hasattr(self, field):
                     var = getattr(self, field)
@@ -1387,7 +1550,7 @@ class data(object):
         return out_ds
 
     def to_gdal(self, driver='MEM', out_file='', field='z', srs_proj4=None,
-                srs_wkt=None, srs_epsg=None, EPSG=None,dtype=gdal.GDT_Float32,
+                srs_wkt=None, srs_epsg=None, EPSG=None, dtype=None,
                 options=["compress=LZW"]):
         """
         Write a grid object to a gdal memory object.
@@ -1414,10 +1577,15 @@ class data(object):
             GDAL creation options for output raster
         """
 
+        from osgeo import gdal, gdalconst, osr, ogr
+        if dtype is None:
+            dtype = gdal.GDT_Float32
         z=np.atleast_3d(getattr(self, field))
         ny,nx,nband = [*map(int, z.shape)]
-        dx=np.abs(np.diff(self.x[0:2]))[0]
-        dy=np.abs(np.diff(self.y[0:2]))[0]
+        col = getattr(self, self._col_coord)
+        row = getattr(self, self._row_coord)
+        dx=np.abs(np.diff(col[0:2]))[0]
+        dy=np.abs(np.diff(row[0:2]))[0]
 
         # no supported creation options with in memory rasters
         if driver=='MEM':
@@ -1428,7 +1596,7 @@ class data(object):
 
         # top left x, w-e pixel resolution, rotation
         # top left y, rotation, n-s pixel resolution
-        out_ds.SetGeoTransform((self.x.min()-dx/2, dx, 0, self.y.max()+dy/2, 0., -dy))
+        out_ds.SetGeoTransform((col.min()-dx/2, dx, 0, row.max()+dy/2, 0., -dy))
 
         if EPSG is not None:
             srs_epsg=EPSG
@@ -1481,43 +1649,40 @@ class data(object):
             fields=self.fields
 
 
+        row_arr = getattr(self, self._row_coord)
+        col_arr = getattr(self, self._col_coord)
+        band_name = self._band_coord
+        band_arr = getattr(self, band_name) if band_name and hasattr(self, band_name) else self.time or self.t
         if len(self.shape) == 2:
-            x,y=np.meshgrid(self.x, self.y)
+            x,y=np.meshgrid(col_arr, row_arr)
         else:
             if self.t_axis==0:
-                if self.time is not None:
-                    t, y, x = np.meshgrid(self.time, self.y, self.x, indexing='ij')
-                else:
-                    t, y, x = np.meshgrid(self.t, self.y, self.x, indexing='ij')
+                t, y, x = np.meshgrid(band_arr, row_arr, col_arr, indexing='ij')
             elif self.t_axis==2:
-                if self.time is not None:
-                    y, x, t = np.meshgrid(self.y, self.x, self.time, indexing='ij')
-                else:
-                    y, x, t = np.meshgrid(self.y, self.x, self.t, indexing='ij')
+                y, x, t = np.meshgrid(row_arr, col_arr, band_arr, indexing='ij')
 
+        row_key = self._row_coord
+        col_key = self._col_coord
+        band_key = self._band_coord or ('time' if self.time is not None else 't')
         if keep_all:
             result =  pc.data(filename=self.filename).\
-                from_dict({'x':x.ravel(),'y':y.ravel()})
+                from_dict({col_key:x.ravel(), row_key:y.ravel()})
             for field in fields:
                 result.assign({field:getattr(self, field).ravel()})
         else:
             good=np.isfinite(getattr(self, fields[0])).ravel()
             result = pc.data(filename=self.filename).\
-                from_dict({'x':x.ravel()[good],'y':y.ravel()[good]})
+                from_dict({col_key:x.ravel()[good], row_key:y.ravel()[good]})
             for field in fields:
                 result.assign({field:getattr(self, field).ravel()[good]})
         if len(self.shape)==2:
             if self.time is not None:
                 result.assign({'time':self.time+np.zeros_like(getattr(result, field))})
         else:
-            if self.time is not None:
-                time_var='time'
-            else:
-                time_var='t'
             if keep_all:
-                result.assign({time_var:t.ravel()})
+                result.assign({band_key:t.ravel()})
             else:
-                    result.assign({time_var:t.ravel()[good]})
+                result.assign({band_key:t.ravel()[good]})
         return result
 
     def get_latlon(self, srs_proj4=None, srs_wkt=None, srs_epsg=None):
@@ -1540,6 +1705,7 @@ class data(object):
         latitude: float
             latitude coordinates of grid cells
         """
+        import pyproj
         # set the spatial projection reference information
         if srs_proj4 is not None:
             source = pyproj.CRS.from_proj4(srs_proj4)
@@ -1564,7 +1730,7 @@ class data(object):
         if alpha is None:
             if nodata_vals is not None:
                 alpha=np.ones_like(getattr(self, field)[:,:,0])
-                if hasattr(nodata_vals, 'len') and len(nodata_vals)==3:
+                if hasattr(nodata_vals, '__len__') and len(nodata_vals)==3:
                     for ii in range(3):
                         alpha[~np.isfinite(getattr(self, field)[:,:,ii]) | (getattr(self, field)[:,:,ii]==nodata_vals[ii])]=0
                 elif nodata_vals is not None:
@@ -1641,7 +1807,7 @@ class data(object):
         else:
             zz=getattr(self, field)
 
-        gy, gx=np.gradient(zz, self.y, self.x)
+        gy, gx=np.gradient(zz, getattr(self, self._row_coord), getattr(self, self._col_coord))
         self.assign({field+'_x':gx, field+'_y':gy})
 
     def toRGB(self, cmap=None, field='z', bands=None, caxis=None, alpha=None):
@@ -1685,15 +1851,21 @@ class data(object):
         """Slice a grid by row or column."""
         if fields is None:
             fields=self.fields
-        self.x=self.x[col_ind]
-        self.y=self.y[row_ind]
+        setattr(self, self._col_coord, getattr(self, self._col_coord)[col_ind])
+        setattr(self, self._row_coord, getattr(self, self._row_coord)[row_ind])
         if band_ind is not None:
-            for field in ['t','time']:
-                try:
-                    setattr(self, field, getattr(self, field)[band_ind])
-                    break
-                except:
-                    pass
+            band_name = self._band_coord
+            if band_name and band_name not in ('t', 'time'):
+                band_arr = getattr(self, band_name, None)
+                if band_arr is not None:
+                    setattr(self, band_name, band_arr[band_ind])
+            else:
+                for field in ['t','time']:
+                    try:
+                        setattr(self, field, getattr(self, field)[band_ind])
+                        break
+                    except:
+                        pass
         for field in fields:
             if len(getattr(self, field).shape) == 2:
                 setattr(self, field, getattr(self, field)[row_ind,:][:, col_ind])
@@ -1708,6 +1880,8 @@ class data(object):
                         setattr(self, field, getattr(self, field)[:, row_ind,:][:, :, col_ind])
                     else:
                         setattr(self, field, getattr(self, field)[band_ind,:,:][:, row_ind, :][:, :, col_ind])
+
+        self.select_fields(fields)
         self.__update_extent__()
         self.__update_size_and_shape__()
         return self
@@ -1741,17 +1915,21 @@ class data(object):
                 return self.copy(fields=fields).index(rc_ind[1], rc_ind[2], band_ind=rc_ind[0])
         return self.copy(fields=fields).index(rc_ind[0], rc_ind[1], band_ind=band_ind)
 
-    def crop(self, XR, YR, TR=None, fields=None):
+    def crop(self, XR=None, YR=None, TR=None, fields=None):
         '''
-        Crop self to specified bounds
+        Crop self to specified bounds inplace
 
 
         Parameters
         ----------
-        XR, YR, TR : iterables
-            two-element iterables specifying the range in each dimension. TR is optional
+        XR, iterable
+            a 2-iterable of numerics specifies the range of x values,
+            or a 2- or 3-iterable of 2-iterables specifies the range of values
+            in each dimension
+        YR, TR : iterables, optional
+            two-element iterables specifying the range in each dimension.
         fields : iterable, optional
-            strings specifying fields to include in the output. The default is None.
+            strings specifying fields to include in the output. The default is to include all fields.
 
         Raises
         ------
@@ -1759,19 +1937,32 @@ class data(object):
             If TR is specified and neither self.time nor self.t is defined, the
             subset is not defined
 
+        The current object will be cropped in place.  To return a cropped copy
+        of the current object, use the 'cropped' method
+
         Returns
         -------
         pointCollection.grid.data
             cropped version of self
 
         '''
+        # Bounds for all dimensions may be packed into a single argument instead
+        # of passed separately, e.g. crop([XR, YR]) or crop([XR, YR, TR]).
+        if XR is not None and YR is None and isinstance(XR[0], (list, tuple, np.ndarray)):
+            if len(XR) == 2:
+                XR, YR = XR
+            elif len(XR) == 3:
+                XR, YR, TR = XR
+            else:
+                raise ValueError('packed bounds must contain 2 (XR, YR) or 3 (XR, YR, TR) entries')
+
         if XR is not None:
-            col_ind = np.flatnonzero((self.x >= XR[0]) & (self.x <= XR[1]))
+            col_ind = np.flatnonzero((getattr(self, self._col_coord) >= XR[0]) & (getattr(self, self._col_coord) <= XR[1]))
         else:
             col_ind=slice(None)
 
         if YR is not None:
-            row_ind = np.flatnonzero((self.y >= YR[0]) & (self.y <= YR[1]))
+            row_ind = np.flatnonzero((getattr(self, self._row_coord) >= YR[0]) & (getattr(self, self._row_coord) <= YR[1]))
         else:
             row_ind=slice(None)
 
@@ -1827,7 +2018,7 @@ class data(object):
             zz /= (t[ddt[1]]-t[ddt[0]])
 
         if gradient:
-            zz=np.gradient(zz.squeeze(), self.x[1]-self.x[0], self.y[1]-self.y[0])[0]
+            zz=np.gradient(zz.squeeze(), getattr(self, self._col_coord)[1]-getattr(self, self._col_coord)[0], getattr(self, self._row_coord)[1]-getattr(self, self._row_coord)[0])[0]
             if 'stretch_pct' not in kwargs and 'clim' not in kwargs:
                 stretch_pct=[5, 95]
             if 'cmap' not in kwargs:
@@ -1881,13 +2072,17 @@ class data(object):
                     z0 = getattr(self, field).copy()
             else:
                 z0 = getattr(self, field).copy()
+            row = getattr(self, self._row_coord)
+            col = getattr(self, self._col_coord)
+            band_name = self._band_coord
+            band_arr = getattr(self, band_name) if band_name else self.t
             if len(getattr(self, field).shape)==2 or band is not None:
-                grid_vars=(self.y, self.x)
+                grid_vars=(row, col)
             else:
                 if self.t_axis==0:
-                    grid_vars=(self.t, self.y, self.x)
+                    grid_vars=(band_arr, row, col)
                 else:
-                    grid_vars=(self.y, self.x, self.t)
+                    grid_vars=(row, col, band_arr)
             self.interpolator[field] = scipy.interpolate.RegularGridInterpolator(
                                                     grid_vars,
                                                     z0, bounds_error=False)
@@ -1927,7 +2122,9 @@ class data(object):
 
         """
 
-        return [[np.min(self.x)-pad, np.max(self.x)+pad], [np.min(self.y)-pad, np.max(self.y)+pad]]
+        col = getattr(self, self._col_coord)
+        row = getattr(self, self._row_coord)
+        return [[np.min(col)-pad, np.max(col)+pad], [np.min(row)-pad, np.max(row)+pad]]
 
     def boundary(self, type='image'):
         """
@@ -1978,12 +2175,12 @@ class data(object):
 
     def rasterize_poly(self, in_geom, field='z', burn_value=1, epsg=1024, raster_epsg=None, poly_epsg=None):
         """Rasterize a shapely polygon"""
-
+        from osgeo import gdal, osr, ogr
         # use whatever epsgs are specified, if none, use epsg 1024 (generic xy cartesian)
         if raster_epsg is None:
             if self.srs_epsg is not None:
                 raster_epsg = self.srs_epsg
-            if poly_epsg is not None:
+            elif poly_epsg is not None:
                 raster_epsg = poly_epsg
             else:
                 raster_epsg = epsg
@@ -2032,8 +2229,12 @@ class data(object):
         srs_epsg: int or NoneType, default None
             EPSG projection code
         """
+        from osgeo import osr
         # output projection attributes dictionary
         self.crs = {}
+        # return early if no projection was specified (avoids touching osr)
+        if srs_proj4 is None and srs_wkt is None and srs_epsg is None:
+            return
         # set the spatial projection reference information
         sr = osr.SpatialReference()
         if srs_proj4 is not None:
@@ -2042,8 +2243,6 @@ class data(object):
             sr.ImportFromWkt(srs_wkt)
         elif srs_epsg is not None:
             sr.ImportFromEPSG(srs_epsg)
-        else:
-            return
         # convert proj4 string to dictionary
         proj4_dict = {p[0]:p[1] for p in re.findall(r'\+(.*?)\=([^ ]+)',sr.ExportToProj4())}
         # get projection attributes

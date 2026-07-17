@@ -11,7 +11,6 @@ Coordinates below are always provided as tuples or lists, the first member of wh
 """
 import numpy as np
 import re
-import h5py
 #from osgeo import osr
 #import matplotlib.pyplot as plt
 import pointCollection as pc
@@ -199,6 +198,7 @@ class geoIndex(dict):
         faster than reading the whole file.
         """
 
+        import h5py
         h5_f = h5py.File(os.path.expanduser(index_file),'r')
         h5_i = h5_f[group]
         if read_file:
@@ -232,6 +232,7 @@ class geoIndex(dict):
         """
         write the current geoindex to h5 file 'filename'
         """
+        import h5py
         indexF = h5py.File(os.path.expanduser(filename),'a', libver='latest')
         if 'index' in indexF:
             del indexF['index']
@@ -294,7 +295,7 @@ class geoIndex(dict):
                     if self.DEBUG:
                         raise(e)
                     pass
-            self.from_list(temp)            
+            self.from_list(temp)
         if file_type in ['h5']:
             D=pc.data().from_h5(filename, field_dict={group:['x','y']})
             if D.x.size > 0:
@@ -332,6 +333,7 @@ class geoIndex(dict):
             self.attrs['n_files']=1
             self.from_xy(xy_bin, filename=filename_out, file_type=file_type, number=number, fake_offset_val=-1)
         if file_type in ['indexed_h5']:
+            import h5py
             h5f=h5py.File(filename,'r')
             if 'INDEX' in h5f:
                 xy=[np.array(h5f['INDEX']['bin_x']), np.array(h5f['INDEX']['bin_y'])]
@@ -362,6 +364,7 @@ class geoIndex(dict):
                 self.attrs['dir_root']=dir_root
             h5f.close()
         if file_type in ['indexed_h5_from_matlab']:
+            import h5py
             h5f=h5py.File(filename,'r')
             xy=[np.array(h5f['INDEX']['bin_x']), np.array(h5f['INDEX']['bin_y'])]
             first_last=None
@@ -393,12 +396,13 @@ class geoIndex(dict):
         temp=pc.data().from_dict({'latitude':lat,'longitude':lon}).get_xy(SRS_proj4=self.attrs['SRS_proj4'])
         x=temp.x
         y=temp.y
-        delta=self.attribs['delta']
+        delta=self.attrs['delta']
         xb=np.round(x/delta[0])*delta[0]
         yb=np.round(y/delta[1])*delta[1]
-        return self.query_xy(xb, yb, get_data=get_data, fields=fields, error_action=error_action)
+        return self.query_xy([xb, yb], get_data=get_data, fields=fields, error_action=error_action)
 
-    def query_xy_box(self, xr, yr, get_data=True, fields=None, dir_root='', error_action='warn'):
+    def query_xy_box(self, xr, yr, get_data=True, fields=None, dir_root='',
+                     full_path=False, error_action='warn'):
         """
         query the current geoIndex for all bins in the box specified by box [xr,yr]
         """
@@ -406,7 +410,11 @@ class geoIndex(dict):
         these=(xy_bin[0] >= xr[0]) & (xy_bin[0] <= xr[1]) &\
             (xy_bin[1] >= yr[0]) & (xy_bin[1] <= yr[1])
         return self.query_xy([xy_bin[0][these], xy_bin[1][these]], get_data=get_data, \
-                             fields=fields, dir_root=dir_root, bounds=[xr, yr], error_action=error_action)
+                             fields=fields,
+                             dir_root=dir_root,
+                             bounds=[xr, yr],
+                             full_path = full_path,
+                             error_action = error_action)
 
     def intersect(self, other, pad=[0, 0]):
         """
@@ -420,8 +428,15 @@ class geoIndex(dict):
         other_sub=other.copy_subset(xyBin=[xyB[:,0], xyB[:,1]], pad=pad[1])
         return self_sub, other_sub
 
-    def query_xy(self, xyb, cleanup=True, get_data=True, fields=None, pad=None,
-                 dir_root='', strict=False, bounds=None, error_action='warn'):
+    def query_xy(self, xyb, cleanup = True,
+                 get_data = True,
+                 full_path = True,
+                 fields=None,
+                 pad=None,
+                 dir_root='',
+                 strict=False,
+                 bounds=None,
+                 error_action='warn'):
         """
         check if data exist within the current geo index for bins in lists/arrays
             xb and yb.
@@ -489,12 +504,14 @@ class geoIndex(dict):
                 i1=i1[keep]
                 xy=xy[keep,:]
             # if the file_N attribute begins with ':', it's a group in the current file, so add the current filename
-            this_query_file=self.attrs['file_%d' % out_file_num]
+            this_query_file = self.attrs['file_%d' % out_file_num]
             if this_query_file is not None and this_query_file[0] == ':':
                 file_base=self.filename.replace(dir_root,'')
                 if 'dir_root' in self.attrs:
                     file_base=file_base.replace(self.attrs['dir_root'],'')
                 this_query_file = file_base + this_query_file
+            if full_path:
+                this_query_file = self.resolve_path(this_query_file, dir_root)
             query_results[this_query_file]={
             'type':self.attrs['type_%d' % out_file_num],
             'offset_start':i0,
@@ -594,7 +611,7 @@ class geoIndex(dict):
                     [np.min(all_y)-delta[1]/2, np.max(all_y)+delta[1]/2]]
 
         for file_key, result in query_results.items():
-            this_file=self.resolve_path(file_key, dir_root)
+            this_file = self.resolve_path(file_key, dir_root)
             try:
                 if not (os.path.isfile(this_file) or os.path.isfile(this_file.split(':')[0])):
                     print(f'geoIndex.get_data(): missing file {this_file}')
@@ -607,23 +624,21 @@ class geoIndex(dict):
                 elif result['type'] == 'h5_geoindex':
                     D=geoIndex().from_file(this_file).query_xy((result['x'], result['y']), fields=fields, get_data=True, dir_root=dir_root, error_action=error_action)
                 elif result['type'] == 'ATL06':
+                    this_file, pair = this_file.split(':pair')
                     if fields is None:
                         fields={None:(u'latitude',u'longitude',u'h_li',u'delta_time')}
-                    D6_file, pair=this_file.split(':pair')
                     D=[pc.ATL06.data(beam_pair=int(pair), fields=field_list, field_dict=field_dict).from_h5(\
-                        filename=D6_file, index_range=np.array(temp)) \
+                        filename=this_file, index_range=np.array(temp)) \
                         for temp in zip(result['offset_start'], result['offset_end'])]
                 elif result['type'] == 'ATL11':
-                    D11_file, pair = this_file.split(':pair')
+                    this_file, pair = this_file.split(':pair')
                     try:
-                        if not os.path.isfile(D11_file):
-                            print(D11_file)
                         D=[pc.ATL11.data().from_h5(\
-                                filename=D11_file, index_range=np.array(temp), \
+                                filename=this_file, index_range=np.array(temp), \
                                 pair=int(pair), field_dict=field_dict) \
                                 for temp in zip(result['offset_start'], result['offset_end'])]
                     except Exception as e:
-                        print(f"pointCollection.geoIndex: problem with ATL11 file:{D11_file} for beam pair {pair}.")
+                        print(f"pointCollection.geoIndex: problem with ATL11 file:{this_file} for beam pair {pair}.")
                         print("        Indexing information:")
                         print(result)
                         print("         Exception:")
@@ -711,7 +726,7 @@ class geoIndex(dict):
 
     def bin_latlon(self):
         xy_bin=self.bins_as_array()
-        temp=pc.data().from_dict({'x':xy_bin[:,0],'y':xy_bin[:,1]}).get_latlon(SRS_proj4=self.attrs['SRS_proj4'])
+        temp=pc.data().from_dict({'x':xy_bin[0],'y':xy_bin[1]}).get_latlon(SRS_proj4=self.attrs['SRS_proj4'])
 
         #internal_srs=osr.SpatialReference()
         #internal_srs.ImportFromProj4(self.attrs['SRS_proj4'])
