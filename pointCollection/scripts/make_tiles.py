@@ -10,6 +10,7 @@ import pointCollection as pc
 import os
 import argparse
 import sys
+from pathlib import Path
 import numpy as np
 import json
 
@@ -69,7 +70,8 @@ def make_queue(index_file, queue_file, tile_W=2.e5, file_type='data', verbose=Fa
             out_file=f"{out_dir}/E{int(np.real(xx))}_N{int(np.imag(xx))}.h5"
             if os.path.isfile(out_file) and not replace:
                 continue
-            this_str=f"{__file__} -i {index_file} -W {tile_W} -t {file_type} --proj4 '{proj4}' --xy {np.real(xx)} {np.imag(xx)} -o {out_dir}"
+            this_script=Path(__file__).name
+            this_str=f"{this_script} -i {index_file} -W {tile_W} -t {file_type} --proj4 '{proj4}' --xy {np.real(xx)} {np.imag(xx)} -o {out_dir}"
             if field_dict_json is not None:
                 this_str += f" -j {field_dict_json}"
             if verbose: 
