@@ -4,10 +4,10 @@ Created on Fri Sep 21 14:28:30 2018
 
 @author: ben
 """
-import h5py
 import numpy as np
 import pointCollection as pc
-import pyproj
+
+#TBD: read/write additional formats (parquet?)
 
 class data(object):
     """
@@ -30,7 +30,7 @@ class data(object):
         -a copy of the object sliced by the index otherwise
     """
     np.seterr(invalid='ignore')
-    def __init__(self, data_dict=None, fields=None, SRS_proj4=None, EPSG=None, field_dict=None, columns=0, filename=None):
+    def __init__(self, data_dict=None, fields=None, SRS_proj4=None, EPSG=None, field_dict=None, columns=0, filename=None, coordinates=['x', 'y']):
         """
         Initialize a new pointCollection.data object
 
@@ -51,6 +51,9 @@ class data(object):
             of shape [Ndata, columns]. The default is 0, specifying a shape of [Ndata]
         filename : str, optional
             a filename indicating the source of the data. The default is None.
+        coordinates : list, optional
+            two-element list giving the names of the x and y coordinate fields.
+            The default is ['x', 'y'].
 
         Returns
         -------
@@ -62,6 +65,8 @@ class data(object):
         else:
             self.field_dict=field_dict
 
+        self.shape=None
+        self.size=None
         if fields is None:
             fields=list()
             if field_dict is not None:
@@ -69,14 +74,15 @@ class data(object):
                     for field in self.field_dict[group]:
                         fields.append(field)
         if isinstance(fields, dict):
-            self.fields=list(fields)
-        self.fields=fields
+            self.fields=list()
+            self.assign(fields)
+        else:
+            self.fields=fields
         self.SRS_proj4=SRS_proj4
         self.EPSG=EPSG
         self.columns=columns
-        self.shape=None
-        self.size=None
         self.filename=filename
+        self.coordinates=list(coordinates)
         if data_dict is not None:
             self.assign(data_dict)
         self.attrs={}
@@ -97,13 +103,21 @@ class data(object):
     def __copy__(self):
         other=self.copy_attrs()
         for field in self.fields:
-            setattr(other, field, getattr(self, field).copy())
+            try:
+                setattr(other, field, getattr(self, field).copy())
+            except AttributeError:
+                if isinstance(getattr(self, field), (int, float)):
+                    setattr(other, field, getattr(self, field))
         return other
 
-    def __update_size_and_shape__(self):
+    def __update_size_and_shape__(self, shape=None):
         """
         When data size and shape may have changed, update the size and shape atttributes
         """
+        if shape is not None:
+            self.shape=shape
+            self.size=int(np.prod(shape))
+            return self
         self.size=0
         self.shape=[0]
         for field in self.fields:
@@ -116,6 +130,14 @@ class data(object):
             except AttributeError:
                 pass
         return self
+
+    @property
+    def _x_coord(self):
+        return self.coordinates[0]
+
+    @property
+    def _y_coord(self):
+        return self.coordinates[1]
 
     def __getitem__(self, *args, **kwargs):
         """
@@ -169,7 +191,7 @@ class data(object):
         elif EPSG is not None:
             crs=EPSG
         else:
-            if self.SRS_proj4 is None:
+            if self.SRS_proj4 is not None:
                 crs=self.SRS_proj4
             else:
                 crs=self.EPSG
@@ -186,7 +208,7 @@ class data(object):
         copy attributes to a new data object
         """
         out = type(self)()
-        for field in ['fields', 'SRS_proj4', 'EPSG', 'columns']:
+        for field in ['fields', 'SRS_proj4', 'EPSG', 'columns', 'coordinates']:
             try:
                 temp=getattr(self, field)
             except AttributeError:
@@ -273,12 +295,13 @@ class data(object):
                 called to fill in the missing fields.
 
         """
+        import h5py
         if filename is None:
             filename=self.filename
         else:
             self.filename=filename
 
-        if fields is None and fields is not None:
+        if field is not None and fields is None:
             fields = [field]
         if fields is not None:
             field_dict = {group:fields}
@@ -293,9 +316,10 @@ class data(object):
                     # build the field dict from the group
                     if not isinstance(group, (list, tuple)):
                         group=[group]
+                    field_dict={}
                     for this_group in group:
-                        field_dict={this_group: [key for key in h5_f[this_group].keys() \
-                                                 if isinstance(h5_f[this_group][key], h5py.Dataset)]}
+                        field_dict[this_group] = [key for key in h5_f[this_group].keys() \
+                                                  if isinstance(h5_f[this_group][key], h5py.Dataset)]
                 else:
                     if self.field_dict is not None:
                         field_dict=self.field_dict
@@ -353,6 +377,27 @@ class data(object):
                 if self.shape is not None:
                     for field in nan_fields:
                         setattr(self, field, np.zeros(self.shape)+np.nan)
+            # infer coordinates from CF 'coordinates' attribute
+            coord_names = []
+            for grp_name in field_dict.keys():
+                if grp_name == '__calc_internal__':
+                    continue
+                for ds_name in field_dict[grp_name]:
+                    try:
+                        ds = h5_f[ds_name] if grp_name is None else h5_f[grp_name][ds_name]
+                    except KeyError:
+                        continue
+                    coords_attr = ds.attrs.get('coordinates', None)
+                    if coords_attr is not None:
+                        if isinstance(coords_attr, bytes):
+                            coords_attr = coords_attr.decode('utf-8')
+                        for name in coords_attr.split():
+                            if name not in coord_names:
+                                coord_names.append(name)
+                        break
+            inferred = [c for c in coord_names if c in self.fields]
+            if inferred:
+                self.coordinates = inferred
         if '__calc_internal__' in field_dict:
             try:
                 self.__internal_field_calc__(field_dict)
@@ -363,17 +408,20 @@ class data(object):
         self.__update_size_and_shape__()
         return self
 
-    def get_xy(self, *args, **kwargs):
+    def get_xy(self, *args, src_coords=None, dst_coords=None, **kwargs):
 
         '''
         Calculate projected coordinates from latitude and longitude fields
 
         x and y fields are calculated based on an object's latitude and
-        longitude fields.
+        longitude fields.  The object's coordinates will be set to ['x','y']
 
         Parametes
         *args: iterable
             list of arguments passed to self.choose_crs()
+        dst_coords: iterable of strings
+            these will be used as the names of the output coordinates.
+            default is 'x','y'
         **kwargs: dict
             keyword=pair arguments passed to self.choose_crs()
         Returns
@@ -381,8 +429,8 @@ class data(object):
         self: pointCollection.data
             Current object with updated x and y fields
         '''
+        import pyproj
         crs=self.choose_crs(*args,**kwargs)
-
 
         try:
             # this is compatible with pyproj 3.7.0
@@ -399,10 +447,13 @@ class data(object):
                     xy=np.array(pyproj.Proj("+init=epsg:"+str(crs))(self.longitude, self.latitude))
                 else:
                     xy=np.array(pyproj.Proj(crs)(self.longitude, self.latitude))
-        self.x=xy[0,:].reshape(self.shape)
-        self.y=xy[1,:].reshape(self.shape)
-        if 'x' not in self.fields:
-            self.fields += ['x','y']
+        if dst_coords is None:
+            dst_coords = ['x','y']
+
+        for coord_ind in [0, 1]:
+            self.assign({ dst_coords[coord_ind] : xy[coord_ind,:].reshape(self.shape)})
+        # this may be a problem for data that have one or three coordinates.
+        self.coordinates = dst_coords
         return self
 
     def get_latlon(self, *args, **kwargs):
@@ -425,22 +476,25 @@ class data(object):
             Current object with updated latitude and longitude fields
 
         '''
+        import pyproj
         crs=self.choose_crs(*args,**kwargs)
+        _x=getattr(self, self._x_coord)
+        _y=getattr(self, self._y_coord)
         try:
             # Compatible with pyproj 3.7.0
             # Note that EPSG:4326 takes latitude first
             latlon = np.array(pyproj.Transformer.from_crs(pyproj.CRS(crs),
-                                                 pyproj.CRS(4326)).transform(self.x, self.y))
+                                                 pyproj.CRS(4326)).transform(_x, _y))
             self.assign({"longitude":latlon[1,:].reshape(self.shape),\
                          "latitude":latlon[0,:].reshape(self.shape)})
         except Exception:
             if hasattr(pyproj, 'proj'):
-                lonlat=np.array(pyproj.proj.Proj(crs)(self.x, self.y, inverse=True))
+                lonlat=np.array(pyproj.proj.Proj(crs)(_x, _y, inverse=True))
             else:
                 if isinstance(crs, int):
-                    lonlat=np.array(pyproj.Proj("+init=epsg:"+str(crs))(self.x, self.y))
+                    lonlat=np.array(pyproj.Proj("+init=epsg:"+str(crs))(_x, _y, inverse=True))
                 else:
-                    lonlat=np.array(pyproj.Proj(crs)(self.x, self.y))
+                    lonlat=np.array(pyproj.Proj(crs)(_x, _y, inverse=True))
             self.assign({"longitude":lonlat[0,:].reshape(self.shape), \
                                  "latitude":lonlat[1,:].reshape(self.shape)})
         return self
@@ -464,7 +518,6 @@ class data(object):
 
         """
 
-
         if fields is not None:
             self.fields=fields
         else:
@@ -473,7 +526,7 @@ class data(object):
         try:
             default_shape=dd[next(iter(dd))].shape
         except StopIteration:
-            print("HERE!")
+            raise ValueError("pointCollection.data.from_dict: empty dict")
         for field in self.fields:
             if field in dd:
                 setattr(self, field, dd[field])
@@ -605,31 +658,38 @@ class data(object):
         number of elements, the average of the elements spanning the median is
         returned.
 
+        The median index is computed from a 1-D field.  Other fields may be
+        1-D or multi-column: for a field of shape (N, M) the index selects
+        rows, returning shape (K, M).
+
         Parameters
         ----------
         scale : float
             Scale over which the blockmedian is calculated.
         field : str, optional
-            Points within the object are selected based on the values in this
-            field. The default is 'z'.
+            1-D field used to compute the median index. The default is 'z'.
+            A ValueError is raised if this field is multi-column.
 
         Returns
         -------
         pointCollection.data
-            Object containing the meidan values
+            Object containing the median values
 
         """
 
-
         if self.size<2:
             return self
-        ind = pc.pt_blockmedian(self.x, self.y, np.float64(getattr(self, field)), scale, return_index=True)[3]
-        try:
-            for field in self.fields:
-                temp_field=getattr(self, field)
-                setattr(self, field,  0.5*temp_field[ind[:,0]] + 0.5*temp_field[ind[:,1]])
-        except IndexError:
-            pass
+        ref = getattr(self, field)
+        if ref.ndim > 1:
+            raise ValueError(
+                f"blockmedian: field '{field}' must be 1-D (shape {ref.shape} given)")
+        _x = getattr(self, self._x_coord)
+        _y = getattr(self, self._y_coord) if len(self.coordinates) >= 2 else np.zeros_like(_x)
+        ind = pc.pt_blockmedian(_x, _y, np.float64(ref), scale, return_index=True)[3]
+        new_fields = {name: 0.5*getattr(self, name)[ind[:,0]] + 0.5*getattr(self, name)[ind[:,1]]
+                      for name in self.fields}
+        for name, val in new_fields.items():
+            setattr(self, name, val)
         self.__update_size_and_shape__()
         return self
 
@@ -649,9 +709,13 @@ class data(object):
 
         """
 
+        if self.shape is not None:
+            default_shape=self.shape
+        else:
+            default_shape=[0]
         for field in fields:
             if field not in self.fields:
-                self.assign({field:np.zeros(self.shape)+np.nan})
+                self.assign({field:np.zeros(default_shape)+np.nan})
 
     def copy_subset(self, index, by_row=False, datasets=None, fields=None):
         """
@@ -675,7 +739,7 @@ class data(object):
 
         """
         dd=dict()
-        if self.columns is not None and self.columns >=1 and by_row is not None or isinstance(index, slice):
+        if (self.columns is not None and self.columns >= 1) or isinstance(index, slice):
             by_row=True
         if fields is not None and datasets is None:
             datasets=fields
@@ -704,20 +768,48 @@ class data(object):
                     print("IndexError")
         return self.copy_attrs().from_dict(dd, fields=datasets)
 
-    def cropped(self, bounds, return_index=False, **kwargs):
+    def _crop_index(self, bounds):
+        """
+        Build a boolean index selecting points within per-dimension bounds.
+
+        Bounds may be given either as one 2-iterable of (min, max) per
+        dimension, in order matching self.coordinates (e.g. (XR, YR)), or
+        packed into a single iterable of iterables (e.g. [XR, YR]).
+        Trailing dimensions may be omitted, and any dimension's bounds may
+        be None, to leave that dimension uncropped.
+        """
+        if len(bounds) == 1 and isinstance(bounds[0][0], (list, tuple, np.ndarray)):
+            bounds = bounds[0]
+        if len(bounds) > len(self.coordinates):
+            raise ValueError(f"crop: got bounds for {len(bounds)} dimensions, "
+                              f"but self.coordinates has only {len(self.coordinates)}")
+        bounds = list(bounds) + [None] * (len(self.coordinates) - len(bounds))
+
+        ind = np.ones(getattr(self, self.coordinates[0]).shape, dtype=bool)
+        for coord, b in zip(self.coordinates, bounds):
+            if b is None:
+                continue
+            val = getattr(self, coord)
+            ind &= (val >= b[0]) & (val <= b[1])
+        return ind
+
+    def cropped(self, *bounds, return_index=False, **kwargs):
         """
         Return a cropped copy of an object
 
-        Returns a copy self for which
-            bounds[0][0] <= self.x <= bounds[0][1]
-            and
-            bounds[1][0] <= self.y <= bounds[1][1]
+        Returns a copy of self restricted to points for which each
+        coordinate in self.coordinates falls within the corresponding
+        range in bounds (e.g. bounds[0][0] <= self.x <= bounds[0][1] and
+        bounds[1][0] <= self.y <= bounds[1][1]).
 
         Parameters
         ----------
-        bounds : iterable
-            A list of two iterables containing the range of x values and y values
-            to include in the output.
+        *bounds : iterable
+            Bounds for each dimension in self.coordinates, given either as
+            separate arguments in order (e.g. cropped(XR, YR)) or packed
+            into a single iterable of iterables (e.g. cropped([XR, YR])).
+            Trailing dimensions may be omitted, and any dimension's bounds
+            may be None, to leave that dimension uncropped.
         return_index : bool, optional
             If True, return only the indices of the points within the bounds.
             The default is False.
@@ -730,34 +822,27 @@ class data(object):
             cropped version of the inptu data
 
         """
-
-        ind = (self.x >= bounds[0][0]) & (self.x <= bounds[0][1]) &\
-              (self.y >= bounds[1][0]) & (self.y <= bounds[1][1])
+        ind = self._crop_index(bounds)
         if return_index:
             return ind
         return self.copy_subset(ind, **kwargs)
 
-    def crop(self, bounds):
+    def crop(self, *bounds):
         """
         Crop current object in place.
 
         Parameters
         ----------
-        bounds : iterable
-            A list of two iterables containing the range of x values and y values
-            to include in the output.
-        return_index : bool, optional
-            If True, return only the indices of the points within the bounds.
-            The default is False.
+        *bounds : iterable
+            Bounds for each dimension in self.coordinates. See `cropped`
+            for the accepted forms.
 
         Returns
         -------
         None
 
         """
-
-        self.index((self.x >= bounds[0][0]) & (self.x <= bounds[0][1]) &\
-              (self.y >= bounds[1][0]) & (self.y <= bounds[1][1]))
+        self.index(self._crop_index(bounds))
 
     def to_h5(self, fileOut=None,
               h5f_out=None,
@@ -806,6 +891,7 @@ class data(object):
         None.
 
         """
+        import h5py
         # check whether overwriting existing files
         # append to existing files as default
         mode = 'w' if replace else 'a'
@@ -815,117 +901,121 @@ class data(object):
         else:
             close_file = False
 
-        if group is not None:
-            if not group in h5f_out:
-                h5f_out.create_group(group.encode('ascii'))
-        field_dict={}
-        if meta_dict is None:
-            field_dict = {field:field for field in self.fields}
-        else:
-            field_dict = {}
-            for out_field, this_md in meta_dict.items():
-                if 'source_field' in this_md and this_md['source_field'] is not None and this_md['source_field'] in self.fields:
-                    field_dict[out_field] = this_md['source_field']
-                elif out_field in self.fields:
-                    field_dict[out_field] = out_field
-
-        if meta_dict is None:
-            meta_dict = {out_field:{} for out_field in field_dict.keys()}
-
-        # establish the coordinate fields first
-        dimension_fields=[]
-        non_dimension_fields=[]
-        for out_field in field_dict.keys():
-            if 'dimension' in meta_dict[out_field] and meta_dict[out_field]['dimension']:#(out_field==meta_dict[out_field]['dimensions'] or out_field in meta_dict[out_field]['dimensions']):
-                dimension_fields += [out_field]
+        try:
+            if group is not None:
+                if not group in h5f_out:
+                    h5f_out.create_group(group)
+            field_dict={}
+            if meta_dict is None:
+                field_dict = {field:field for field in self.fields}
             else:
-                non_dimension_fields += [out_field]
+                field_dict = {}
+                for out_field, this_md in meta_dict.items():
+                    if 'source_field' in this_md and this_md['source_field'] is not None and this_md['source_field'] in self.fields:
+                        field_dict[out_field] = this_md['source_field']
+                    elif out_field in self.fields:
+                        field_dict[out_field] = out_field
 
-        for out_field in dimension_fields + non_dimension_fields:
-            this_data=getattr(self, field_dict[out_field])
-            maxshape=this_data.shape
-            if extensible:
-                maxshape=list(maxshape)
-                maxshape[0]=None
-            # try prepending the 'group' entry of meta_dict to the output field.
-            # catch the exception thrown if meta_dict is None or if the 'group'
-            # entry is not there
-            out_field_name=out_field
-            try:
-                out_field_name = meta_dict[out_field]['group'] + out_field
-            except (TypeError, KeyError) as e:
-                if DEBUG:
-                    print(e)
-            out_field_name = group + '/' +out_field
-            kwargs = dict( compression=compression,
-                          maxshape=tuple(maxshape))
-            if meta_dict is not None and 'precision' in meta_dict[out_field] and meta_dict[out_field]['precision'] is not None:
-                kwargs['scaleoffset']=int(meta_dict[out_field]['precision'])
-            if 'datatype' in meta_dict[out_field]:
-                dtype = meta_dict[out_field]['datatype'].lower()
-                kwargs['dtype']=dtype
-                if 'int' in dtype:
-                    kwargs['fillvalue'] = np.iinfo(np.dtype(dtype)).max
+            if meta_dict is None:
+                meta_dict = {out_field:{} for out_field in field_dict.keys()}
+
+            # establish the coordinate fields first
+            dimension_fields=[]
+            non_dimension_fields=[]
+            for out_field in field_dict.keys():
+                if 'dimension' in meta_dict[out_field] and meta_dict[out_field]['dimension']:#(out_field==meta_dict[out_field]['dimensions'] or out_field in meta_dict[out_field]['dimensions']):
+                    dimension_fields += [out_field]
                 else:
-                    kwargs['fillvalue'] = np.finfo(np.dtype(dtype)).max
-            # use an explicit '_FillValue' for preference over an overall fillvalue
-            if '_FillValue' in meta_dict[out_field]:
-                this_data = np.nan_to_num(this_data,nan=meta_dict[out_field]['_FillValue'])
-            elif 'fillvalue' in kwargs:
-                this_data = np.nan_to_num(this_data,nan=kwargs['fillvalue'])
-            if 'dtype' in kwargs:
-                this_data = this_data.astype(kwargs['dtype'])
+                    non_dimension_fields += [out_field]
 
-            # Create the dataset
-            dset = h5f_out.create_dataset(out_field_name.encode('ASCII'),
-                                data=this_data,  **kwargs)
-            if 'dimension' in meta_dict[out_field] and meta_dict[out_field]['dimension']:
-                dset.make_scale()
-            if out_field in meta_dict:
-                for key, val in meta_dict[out_field].items():
-                    if key.lower() not in ['group','source_field','precision','dimensions']:
-                        if isinstance(val, str):
-#                            h5f_out[out_field_name.encode('ASCII')].attrs[key] = str(val).encode('utf-8')
-                            h5f_out[out_field_name.encode('ASCII')].attrs.create(str(key), str(val).encode('utf-8'), None, dtype='<S'+str(len(str(val))))
-                        else:
-                            h5f_out[out_field_name.encode('ASCII')].attrs[key] = val
-            if 'dimensions' in meta_dict[out_field]:
-                dims = meta_dict[out_field]['dimensions']
-                if isinstance(dims, str):
-                    dims = dims.split(',')
-                for ind, dim in enumerate(dims):
-                    dset.dims[ind].label=dim
-                    if '../' in dim:
-                        group_path = group.split('/')
-                        while '../' in dim:
-                            dim=dim.lstrip('../')
-                            group_path=group_path[:-1]
-                        try:
-                            dset.dims[ind].attach_scale("/"+h5f_out['/'.join(group_path+[dim])])
-                        except Exception as e:
-                            print("-----")
-                            print([group,out_field_name])
-                            print('/'.join(group_path+[dim]))
-                            print("------")
-                            raise e
+            for out_field in dimension_fields + non_dimension_fields:
+                this_data=getattr(self, field_dict[out_field])
+                maxshape=this_data.shape
+                if extensible:
+                    maxshape=list(maxshape)
+                    maxshape[0]=None
+                # try prepending the 'group' entry of meta_dict to the output field.
+                # catch the exception thrown if meta_dict is None or if the 'group'
+                # entry is not there
+                out_field_name=out_field
+                try:
+                    out_field_name = meta_dict[out_field]['group'] + '/' + out_field
+                except (TypeError, KeyError) as e:
+                    if DEBUG:
+                        print(e)
+                    out_field_name = group + '/' + out_field
+                kwargs = dict( compression=compression,
+                              maxshape=tuple(maxshape))
+                if meta_dict is not None and 'precision' in meta_dict[out_field] and meta_dict[out_field]['precision'] is not None:
+                    kwargs['scaleoffset']=int(meta_dict[out_field]['precision'])
+                if 'datatype' in meta_dict[out_field]:
+                    dtype = meta_dict[out_field]['datatype'].lower()
+                    kwargs['dtype']=dtype
+                    if 'int' in dtype:
+                        kwargs['fillvalue'] = np.iinfo(np.dtype(dtype)).max
                     else:
-                        dset.dims[ind].attach_scale(h5f_out[dim])
-            if 'fillvalue' in kwargs and '_FillValue' not in meta_dict[out_field]:
-                dset.attrs['_FillValue'.encode('ASCII')] = kwargs['fillvalue']
+                        kwargs['fillvalue'] = np.finfo(np.dtype(dtype)).max
+                # use an explicit '_FillValue' for preference over an overall fillvalue
+                if '_FillValue' in meta_dict[out_field]:
+                    this_data = np.nan_to_num(this_data,nan=meta_dict[out_field]['_FillValue'])
+                elif 'fillvalue' in kwargs:
+                    this_data = np.nan_to_num(this_data,nan=kwargs['fillvalue'])
+                if 'dtype' in kwargs:
+                    this_data = this_data.astype(kwargs['dtype'])
 
-        for key, val in self.attrs.items():
-            if val is not None:
-                if isinstance(val, str):
-                    h5f_out[out_field_name.encode('ASCII')].attrs.create(str(key), str(val).encode('utf-8'), None, dtype='<S'+str(len(str(val))))
-                else:
-                    h5f_out[group].attrs[key]=val
+                # Create the dataset
+                dset = h5f_out.create_dataset(out_field_name,
+                                    data=this_data,  **kwargs)
+                if 'dimension' in meta_dict[out_field] and meta_dict[out_field]['dimension']:
+                    dset.make_scale()
+                if self.coordinates and out_field not in self.coordinates:
+                    dset.attrs['coordinates'] = ' '.join(self.coordinates)
+                if out_field in meta_dict:
+                    for key, val in meta_dict[out_field].items():
+                        if key.lower() not in ['group','source_field','precision','dimensions']:
+                            if isinstance(val, str):
+#                            h5f_out[out_field_name.encode('ASCII')].attrs[key] = str(val).encode('utf-8')
+                                h5f_out[out_field_name].attrs.create(str(key), str(val).encode('utf-8'), None, dtype='<S'+str(len(str(val))))
+                            else:
+                                h5f_out[out_field_name].attrs[key] = val
+                if 'dimensions' in meta_dict[out_field]:
+                    dims = meta_dict[out_field]['dimensions']
+                    if isinstance(dims, str):
+                        dims = dims.split(',')
+                    for ind, dim in enumerate(dims):
+                        dset.dims[ind].label=dim
+                        if '../' in dim:
+                            group_path = group.split('/')
+                            while '../' in dim:
+                                dim=dim[3:]
+                                group_path=group_path[:-1]
+                            try:
+                                dset.dims[ind].attach_scale(h5f_out['/'+'/'.join(group_path+[dim])])
+                            except Exception as e:
+                                print("-----")
+                                print([group,out_field_name])
+                                print('/'.join(group_path+[dim]))
+                                print("------")
+                                raise e
+                        else:
+                            dset.dims[ind].attach_scale(h5f_out[dim])
+                if 'fillvalue' in kwargs and '_FillValue' not in meta_dict[out_field]:
+                    dset.attrs['_FillValue'] = kwargs['fillvalue']
 
-        for key in ['EPSG','SRS_proj4']:
-            val=getattr(self, key)
-            if val is not None:
-                h5f_out[group].attrs[key] = val
-        if close_file:
-            h5f_out.close()
+            for key, val in self.attrs.items():
+                if val is not None:
+                    if isinstance(val, str):
+                        h5f_out[group].attrs.create(str(key), str(val).encode('utf-8'), None, dtype='<S'+str(len(str(val))))
+                    else:
+                        h5f_out[group].attrs[key]=val
+
+            for key in ['EPSG','SRS_proj4']:
+                val=getattr(self, key)
+                if val is not None:
+                    h5f_out[group].attrs[key] = val
+        finally:
+            if close_file:
+                h5f_out.close()
 
     def append_to_h5(self, file, group='/', ind_fields=['x','y','time']):
 
@@ -935,6 +1025,7 @@ class data(object):
         N.B.  NOT TESTED
         """
 
+        import h5py
         with h5py.File(file,'r+') as h5f:
             if group in h5f:
                 M_old = np.c_[tuple([np.array(h5f[group][field]).ravel() for field in ind_fields])]
@@ -985,7 +1076,12 @@ class data(object):
         else:
             newdata=dict()
         if len(kwargs) > 0:
-            newdata |= kwargs
+            newdata = newdata | kwargs
+        if self.shape is None:
+            shape=next((v.shape for v in newdata.values() if hasattr(v, 'shape')), None)
+            if shape is None:
+                raise ValueError("pointCollection.data.assign: cannot determine shape; no array-valued fields in input")
+            self.__update_size_and_shape__(shape=shape)
         for field in newdata.keys():
             if isinstance(newdata[field], (int, float)):
                 setattr(self, field, np.zeros(self.shape) + newdata[field])
@@ -995,29 +1091,26 @@ class data(object):
                 self.fields.append(field)
         return self
 
-    def coords(self):
+    def coords(self, order=None):
         """
-        Return the coordinates of an object
+        Return the coordinate arrays of an object, in the order given by
+        self.coordinates.
 
-        Returns the object's coordinates, in (y, x, time) order, or (y, x)
-        if a 't' or 'time' field is not present.  Note that the coordinate
-        order for this method is not consistent with that in the bounds()
-        and crop() functions
+        Parameters
+        -----------
+        order: iterable, optional
+            order of arrays to return (defaults to self.coordinates)
 
         Returns
         -------
         tuple
-            tuple of object coordinates
+            tuple of coordinate arrays
 
         """
+        if order is None:
+            order = self.coordinates.copy()
 
-
-        if 'time' in self.fields:
-            return (self.y, self.x, self.time)
-        elif 't' in self.fields:
-            return (self.y, self.x, self.t)
-        else:
-            return self.y, self.x
+        return tuple(getattr(self, c) for c in order)
 
     def bounds(self, pad=0):
         """
@@ -1033,11 +1126,14 @@ class data(object):
         XR, YR: minimum and maximum of x and y
 
         """
-        if len(self.x)==0:
-            return None, None
-
-        return np.array([np.nanmin(self.x)-pad, np.nanmax(self.x)+pad]), \
-                np.array([np.nanmin(self.y)-pad, np.nanmax(self.y)+pad])
+        _x = getattr(self, self._x_coord)
+        if len(_x) == 0:
+            return (None,) * len(self.coordinates)
+        result = []
+        for c in self.coordinates:
+            v = getattr(self, c)
+            result.append(np.array([np.nanmin(v)-pad, np.nanmax(v)+pad]))
+        return tuple(result)
 
     def ravel_fields(self):
         """

@@ -1,3 +1,6 @@
+import pyproj
+
+
 """
 History
 2/2024 : Written by Tyler Sutterley
@@ -6,6 +9,7 @@ History
 """
 
 
+# PURPOSE: convert heights between reference frames
 def convert_ITRF(lon, lat, z, tdec, epochs=[2014, 2020], direction='forward'):
     """Converts height data between ITRF2014 and ITRF2020
 
@@ -25,24 +29,25 @@ def convert_ITRF(lon, lat, z, tdec, epochs=[2014, 2020], direction='forward'):
             - ``'forward'``: early to late
             - ``'inverse'``: late to early
     """
-    import pyproj
-    if tuple(epochs) == (2014, 2020):
-        pipeline = wgs84_itrf2014_to_wgs84_itrf2020()
-    elif tuple(epochs) == (2005, 2014):
-        pipeline = wgs84_itrf2005_to_wgs84_itrf2014()
-    elif tuple(epochs) == (2008, 2014):
-        pipeline = wgs84_itrf2008_to_wgs84_itrf2014()
-    elif tuple(epochs) == (2005, 2020):
-        pipeline = wgs84_itrf2005_to_wgs84_itrf2020()
-    elif tuple(epochs) == (2008, 2020):
-        pipeline = wgs84_itrf2008_to_wgs84_itrf2020()
-    transform = pyproj.Transformer.from_pipeline(pipeline)
+    # get the transform for converting from ITRF2014 to ITRF2020
+    if tuple(epochs)==(2014, 2020):
+        transform = wgs84_itrf2014_to_wgs84_itrf2020()
+    elif tuple(epochs)==(2005, 2014):
+        transform = wgs84_itrf2005_to_wgs84_itrf2014()
+    elif tuple(epochs)==(2008, 2014):
+        transform = wgs84_itrf2008_to_wgs84_itrf2014()
+    elif tuple(epochs)==(2005, 2020):
+        transform = wgs84_itrf2005_to_wgs84_itrf2020()
+    elif tuple(epochs)==(2008, 2020):
+        transform = wgs84_itrf2008_to_wgs84_itrf2020()
+    
+    # transform the data to ITRF
     return transform.transform(lon, lat, z, tdec, direction=direction)
 
-
+# WGS84 Ellipsoid in ITRF2014 to WGS84 Ellipsoid in ITRF2020
 def wgs84_itrf2014_to_wgs84_itrf2020():
-    """Pipeline string for WGS84 Ellipsoid in ITRF2014 to WGS84 Ellipsoid in ITRF2020"""
-    return """+proj=pipeline
+    """``pyproj`` transform for WGS84 Ellipsoid in ITRF2014 to WGS84 Ellipsoid in ITRF2020"""
+    pipeline = """+proj=pipeline
         +step +proj=unitconvert +xy_in=deg +z_in=m +xy_out=rad +z_out=m
         +step +proj=cart +ellps=WGS84
         +step +proj=helmert +x=0.0014 +y=0.0009 +z=-0.0014 +rx=0 +ry=0 +rz=0 +s=0.00042
@@ -50,11 +55,13 @@ def wgs84_itrf2014_to_wgs84_itrf2020():
             +t_epoch=2015 +convention=position_vector
         +step +inv +proj=cart +ellps=WGS84
         +step +proj=unitconvert +xy_in=rad +z_in=m +xy_out=deg +z_out=m"""
+    return pyproj.Transformer.from_pipeline(pipeline)
 
 
+# WGS84 Ellipsoid in ITRF2008 to WGS84 Ellipsoid in ITRF2014
 def wgs84_itrf2008_to_wgs84_itrf2014():
-    """Pipeline string for WGS84 Ellipsoid in ITRF2008 to WGS84 Ellipsoid in ITRF2014"""
-    return """+proj=pipeline
+    """``pyproj`` transform for WGS84 Ellipsoid in ITRF2008 to WGS84 Ellipsoid in ITRF2014"""
+    pipeline = """+proj=pipeline
         +step +proj=unitconvert +xy_in=deg +z_in=m +xy_out=rad +z_out=m
         +step +proj=cart +ellps=WGS84
         +step +proj=helmert +x=-0.0016 +y=-0.0019 +z=-0.0024 +rx=0 +ry=0 +rz=0 +s=0.00002
@@ -62,11 +69,13 @@ def wgs84_itrf2008_to_wgs84_itrf2014():
             +t_epoch=2015 +convention=position_vector
         +step +inv +proj=cart +ellps=WGS84
         +step +proj=unitconvert +xy_in=rad +z_in=m +xy_out=deg +z_out=m"""
+    return pyproj.Transformer.from_pipeline(pipeline)
 
 
+# WGS84 Ellipsoid in ITRF2005 to WGS84 Ellipsoid in ITRF2014
 def wgs84_itrf2005_to_wgs84_itrf2014():
-    """Pipeline string for WGS84 Ellipsoid in ITRF2005 to WGS84 Ellipsoid in ITRF2014"""
-    return """+proj=pipeline
+    """``pyproj`` transform for WGS84 Ellipsoid in ITRF2005 to WGS84 Ellipsoid in ITRF2014"""
+    pipeline = """+proj=pipeline
         +step +proj=unitconvert +xy_in=deg +z_in=m +xy_out=rad +z_out=m
         +step +proj=cart +ellps=WGS84
         +step +proj=helmert +x=-0.0026 +y=-0.001 +z=0.0023 +rx=0 +ry=0 +rz=0 +s=-0.00092
@@ -74,11 +83,13 @@ def wgs84_itrf2005_to_wgs84_itrf2014():
             +t_epoch=2010 +convention=position_vector
         +step +inv +proj=cart +ellps=WGS84
         +step +proj=unitconvert +xy_in=rad +z_in=m +xy_out=deg +z_out=m"""
+    return pyproj.Transformer.from_pipeline(pipeline)
 
 
+# WGS84 Ellipsoid in ITRF2005 to WGS84 Ellipsoid in ITRF2020
 def wgs84_itrf2005_to_wgs84_itrf2020():
-    """Pipeline string for WGS84 Ellipsoid in ITRF2005 to WGS84 Ellipsoid in ITRF2020"""
-    return """+proj=pipeline
+    """``pyproj`` transform for WGS84 Ellipsoid in ITRF2005 to WGS84 Ellipsoid in ITRF2020"""
+    pipeline = """+proj=pipeline
         +step +proj=unitconvert +xy_in=deg +z_in=m +xy_out=rad +z_out=m
         +step +proj=cart +ellps=WGS84
         +step +proj=helmert +x=-0.0027 +y=-0.0001 +z=0.0014 +rx=0 +ry=0 +rz=0 +s=-0.00065
@@ -86,11 +97,12 @@ def wgs84_itrf2005_to_wgs84_itrf2020():
             +t_epoch=2000 +convention=position_vector
         +step +inv +proj=cart +ellps=WGS84
         +step +proj=unitconvert +xy_in=rad +z_in=m +xy_out=deg +z_out=m"""
+    return pyproj.Transformer.from_pipeline(pipeline)
 
-
+# WGS84 Ellipsoid in ITRF2008 to WGS84 Ellipsoid in ITRF2020
 def wgs84_itrf2008_to_wgs84_itrf2020():
-    """Pipeline string for WGS84 Ellipsoid in ITRF2008 to WGS84 Ellipsoid in ITRF2020"""
-    return """+proj=pipeline
+    """``pyproj`` transform for WGS84 Ellipsoid in ITRF2005 to WGS84 Ellipsoid in ITRF2014"""
+    pipeline = """+proj=pipeline
         +step +proj=unitconvert +xy_in=deg +z_in=m +xy_out=rad +z_out=m
         +step +proj=cart +ellps=WGS84
         +step +proj=helmert +x=-0.0002 +y=-0.001 +z=-0.0033 +rx=0 +ry=0 +rz=0 +s=0.00029
@@ -98,3 +110,4 @@ def wgs84_itrf2008_to_wgs84_itrf2020():
             +t_epoch=2015 +convention=position_vector
         +step +inv +proj=cart +ellps=WGS84
         +step +proj=unitconvert +xy_in=rad +z_in=m +xy_out=deg +z_out=m"""
+    return pyproj.Transformer.from_pipeline(pipeline)
