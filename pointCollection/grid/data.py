@@ -2122,9 +2122,11 @@ class data(object):
 
         """
 
-        col = getattr(self, self._col_coord)
-        row = getattr(self, self._row_coord)
-        return [[np.min(col)-pad, np.max(col)+pad], [np.min(row)-pad, np.max(row)+pad]]
+        col_coord = getattr(self, self._col_coord)
+        row_coord = getattr(self, self._row_coord)
+        if row_coord is None or col_coord is None:
+            return None
+        return [[np.min(col_coord)-pad, np.max(col_coord)+pad], [np.min(row_coord)-pad, np.max(row_coord)+pad]]
 
     def boundary(self, type='image'):
         """
