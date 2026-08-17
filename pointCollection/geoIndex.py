@@ -519,7 +519,7 @@ class geoIndex(dict):
             'x':xy[:,0],
             'y':xy[:,1]}
         if get_data:
-            query_results=self.get_data(query_results, fields=fields, dir_root=dir_root, bounds=bounds, error_action=error_action)
+            query_results=self.get_data(query_results, fields=fields, dir_root=dir_root, bounds=bounds, error_action=error_action, already_resolved=full_path)
             if strict is True:
                 # take the subset of data that rounds exactly to the query (OTW, may get data that extend outside)
                 if not isinstance(query_results, list):
@@ -577,7 +577,7 @@ class geoIndex(dict):
         return filename
 
     def get_data(self, query_results, fields=None,  data=None, dir_root='',
-                 bounds=None, function=None, error_action='warn'):
+                 bounds=None, function=None, error_action='warn', already_resolved=False):
         """
         read the data from a set of query results
         Currently the function knows how to read:
@@ -611,7 +611,10 @@ class geoIndex(dict):
                     [np.min(all_y)-delta[1]/2, np.max(all_y)+delta[1]/2]]
 
         for file_key, result in query_results.items():
-            this_file = self.resolve_path(file_key, dir_root)
+            if already_resolved:
+                this_file = file_key
+            else:
+                this_file = self.resolve_path(file_key, dir_root)
             try:
                 if not (os.path.isfile(this_file) or os.path.isfile(this_file.split(':')[0])):
                     print(f'geoIndex.get_data(): missing file {this_file}')
