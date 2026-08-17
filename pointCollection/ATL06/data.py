@@ -29,17 +29,15 @@ class data(pc.data):
                     for field in self.field_dict[group]:
                         if field not in fields:
                             fields.append(field)
-        if isinstance(fields, dict):
-            self.fields=list(fields)
-        self.fields=fields
-        self.SRS_proj4=SRS_proj4
-        self.coordinates=['longitude','latitude']
-        self.columns=columns
+
+        super().__init__(fields=fields, SRS_proj4=SRS_proj4,
+                          field_dict=self.field_dict, columns=columns,
+                          coordinates=['longitude','latitude'])
+
         self.shape=(0,2)
         self.size=0
         self.beam_pair=beam_pair
         self.beam_type=[None, None]
-        self.filename=None
 
     def __default_field_dict__(self):
         """

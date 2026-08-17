@@ -158,6 +158,18 @@ def test_to_h5_attrs_written_to_group(tmp_path):
         assert 'source' not in f['/data/x'].attrs
 
 
+def test_ATL06_init_and_to_h5(tmp_path):
+    # ATL06.data.__init__ used to skip pc.data.__init__, leaving self.attrs
+    # and self.EPSG unset and crashing to_h5(). Guard against regressions.
+    D = pc.ATL06.data()
+    assert D.attrs == {}
+    assert D.EPSG is None
+
+    D = pc.ATL06.data().from_h5(TEST_H5)
+    outfile = str(tmp_path / 'atl06_out.h5')
+    D.to_h5(outfile, group='/data')
+
+
 def test_coordinates_roundtrip_h5(tmp_path):
     import h5py
     x = np.arange(5.0)
